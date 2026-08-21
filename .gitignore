@@ -1,0 +1,31 @@
+# ==== Python ====
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+.Python
+*.egg-info/
+
+# ==== Environment / Secrets ====
+.env
+*.env
+config_local.py
+
+# ==== Logs ====
+*.log
+
+# ==== Database backups (NEVER commit real data) ====
+*.bak
+*.bacpac
+*.mdf
+*.ldf
+*database*backup*
+*BackUp*.zip
+*Backup*.zip
+
+# ==== Build / OS junk ====
+.DS_Store
+Thumbs.db
+*.tmp
