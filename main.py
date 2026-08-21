@@ -94,7 +94,7 @@ def main():
         if session_state["session_id"] is not None:
             heartbeat_timer.start()
 
-        main_win = MainWindow(user)
+        main_win = MainWindow(user, session_id=session_state.get("session_id"))
         windows.append(main_win)
         main_win.show()
 

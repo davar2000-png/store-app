@@ -32,9 +32,10 @@ import services.settings_service as ss
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, current_user):
+    def __init__(self, current_user, session_id=None):
         super().__init__()
         self.current_user = current_user
+        self.session_id = session_id  # (Phase 13.2) Session جاری، برای انتقال به فرم‌های دارای Draft/AutoSave
         self.setWindowTitle("نرم‌افزار حسابداری فروشگاه موبایل، لپ‌تاپ و کنسول بازی")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.resize(950, 620)
@@ -144,7 +145,7 @@ class MainWindow(QMainWindow):
         self.all_invoices_win.show()
 
     def open_purchases(self):
-        self.purchases_win = PurchaseInvoicesWindow(self.current_user)
+        self.purchases_win = PurchaseInvoicesWindow(self.current_user, session_id=self.session_id)
         self.purchases_win.show()
 
     def open_sales(self):

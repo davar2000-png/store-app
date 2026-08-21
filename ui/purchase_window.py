@@ -6,8 +6,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QLineEdit, QLabel, QDialog, QFormLayout, QComboBox,
     QDoubleSpinBox, QMessageBox, QHeaderView, QTextEdit
 )
-from PyQt6.QtCore import Qt
-import sys, os
+from PyQt6.QtCore import Qt, QTimer
+import sys, os, logging
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.persian_date import today_shamsi_str
@@ -15,22 +15,40 @@ from services.inventory_service import (
     get_suppliers, get_purchase_invoices, get_invoice_items,
     create_purchase_invoice, InventoryError
 )
+from services import draft_service
 from ui.product_picker_dialog import ProductPickerDialog
 from ui.serial_entry_dialog import SerialEntryDialog
+
+logger = logging.getLogger(__name__)
 
 
 class NewPurchaseInvoiceDialog(QDialog):
     """فرم ثبت فاکتور خرید جدید"""
 
-    def __init__(self, current_user):
+    DRAFT_FORM_TYPE = "PurchaseInvoice"  # (Phase 13.2) نوع Draft برای این فرم
+
+    def __init__(self, current_user, session_id=None):
         super().__init__()
         self.current_user = current_user
+        self.session_id = session_id  # (Phase 13.2) برای مرتبط‌کردن Draft به Session جاری
         self.items = []   # هر عنصر: دیکشنری با اطلاعات کالا و سریال‌ها
+        self.draft_id = None  # (Phase 13.2) شناسه Draft فعال این فرم (در صورت وجود)
         self.setWindowTitle("ثبت فاکتور خرید جدید")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.resize(750, 560)
         self._build_ui()
         self.load_suppliers()
+
+        # (Phase 13.2) بررسی وجود Draft قبلی و پرسش از کاربر برای بازیابی
+        self._check_for_existing_draft()
+
+        # (Phase 13.2) شروع AutoSave دوره‌ای (تقریباً هر ۶۰ ثانیه)، بدون قفل‌کردن UI
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setInterval(60000)
+        self.autosave_timer.timeout.connect(self.autosave)
+        self.autosave_timer.start()
+        # با بسته‌شدن دیالوگ (از هر مسیری: تایید/انصراف/دکمه X) تایمر متوقف شود
+        self.finished.connect(lambda _result=None: self.autosave_timer.stop())
 
     def _build_ui(self):
         layout = QVBoxLayout()
@@ -76,8 +94,13 @@ class NewPurchaseInvoiceDialog(QDialog):
         save_btn.clicked.connect(self.save_invoice)
         cancel_btn = QPushButton("انصراف")
         cancel_btn.clicked.connect(self.reject)
+        # (Phase 13.2) فقط وقتی یک Draft فعال/بازیابی‌شده وجود دارد نمایش داده می‌شود
+        self.discard_draft_btn = QPushButton("🗑️ دور ریختن پیش‌نویس")
+        self.discard_draft_btn.clicked.connect(self.discard_recovered_draft)
+        self.discard_draft_btn.setVisible(False)
         btn_row.addWidget(save_btn)
         btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(self.discard_draft_btn)
         layout.addLayout(btn_row)
 
         self.setLayout(layout)
@@ -178,6 +201,123 @@ class NewPurchaseInvoiceDialog(QDialog):
         del self.items[index]
         self.refresh_items_table()
 
+    # ---------------- Draft / AutoSave (Phase 13.2) ----------------
+
+    def _collect_draft_data(self):
+        """داده خام و کاملاً Serializable فرم را برای ذخیره در Draft برمی‌گرداند."""
+        return {
+            "supplier_id": self.supplier_combo.currentData(),
+            "discount": self.discount_input.value(),
+            "tax": self.tax_input.value(),
+            "description": self.description_input.toPlainText(),
+            "items": self.items,
+        }
+
+    def _is_form_empty(self):
+        """اگر فرم هنوز هیچ داده معناداری ندارد، از ساخت Draft خالی صرف‌نظر می‌شود."""
+        return (
+            not self.items
+            and not self.description_input.toPlainText().strip()
+            and self.discount_input.value() == 0
+            and self.tax_input.value() == 0
+        )
+
+    def _check_for_existing_draft(self):
+        """هنگام باز شدن فرم، Draft فعال قبلی (در صورت وجود) را پیدا و از کاربر می‌پرسد."""
+        try:
+            drafts = draft_service.get_active_drafts(
+                self.current_user["ID"], form_type=self.DRAFT_FORM_TYPE
+            )
+        except Exception:
+            logger.exception("خطا در بررسی پیش‌نویس‌های موجود فاکتور خرید")
+            return
+
+        if not drafts:
+            return
+
+        draft = drafts[0]  # جدیدترین Draft فعال
+        reply = QMessageBox.question(
+            self,
+            "بازیابی پیش‌نویس",
+            "یک پیش‌نویس ذخیره‌شده از فاکتور خرید قبلی پیدا شد. آیا می‌خواهید آن را بازیابی کنید؟",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                self._restore_draft(draft)
+            except Exception:
+                logger.exception("خطا در بازیابی پیش‌نویس فاکتور خرید")
+        # اگر کاربر «خیر» را انتخاب کند، فرم خالی می‌ماند و Draft حذف نمی‌شود.
+
+    def _restore_draft(self, draft):
+        """فرم را از داده ذخیره‌شده یک Draft بازسازی می‌کند."""
+        data = draft.get("Data") or {}
+
+        supplier_id = data.get("supplier_id")
+        if supplier_id is not None:
+            idx = self.supplier_combo.findData(supplier_id)
+            if idx >= 0:
+                self.supplier_combo.setCurrentIndex(idx)
+
+        self.discount_input.setValue(data.get("discount") or 0)
+        self.tax_input.setValue(data.get("tax") or 0)
+        self.description_input.setPlainText(data.get("description") or "")
+
+        items = data.get("items")
+        if isinstance(items, list):
+            self.items = items
+        self.refresh_items_table()
+
+        self.draft_id = draft.get("ID")
+        self.discard_draft_btn.setVisible(bool(self.draft_id))
+
+    def autosave(self):
+        """هر تقریباً ۶۰ ثانیه فراخوانی می‌شود. هرگز نباید فاکتور خرید بسازد یا برنامه را متوقف کند."""
+        try:
+            if self._is_form_empty():
+                return
+            data = self._collect_draft_data()
+            self.draft_id = draft_service.save_draft(
+                user_id=self.current_user["ID"],
+                form_type=self.DRAFT_FORM_TYPE,
+                data=data,
+                session_id=self.session_id,
+                draft_id=self.draft_id,
+            )
+            if self.draft_id:
+                self.discard_draft_btn.setVisible(True)
+        except Exception:
+            # طبق بخش ۵ الزامات AutoSave: خطای AutoSave هرگز نباید برنامه را Crash کند
+            logger.exception("خطا در AutoSave پیش‌نویس فاکتور خرید")
+
+    def discard_recovered_draft(self):
+        """با تصمیم صریح کاربر، Draft فعلی را برای همیشه دور می‌ریزد و فرم را پاک می‌کند."""
+        if not self.draft_id:
+            return
+        reply = QMessageBox.question(
+            self,
+            "دور ریختن پیش‌نویس",
+            "آیا مطمئن هستید می‌خواهید این پیش‌نویس را برای همیشه دور بریزید؟\nفرم فعلی پاک خواهد شد.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            draft_service.discard_draft(self.draft_id)
+        except Exception:
+            logger.exception("خطا در دور ریختن پیش‌نویس فاکتور خرید")
+
+        self.draft_id = None
+        self.discard_draft_btn.setVisible(False)
+        self.items = []
+        self.refresh_items_table()
+        self.discount_input.setValue(0)
+        self.tax_input.setValue(0)
+        self.description_input.clear()
+
     def save_invoice(self):
         if self.supplier_combo.count() == 0:
             QMessageBox.warning(self, "خطا", "ابتدا یک فروشنده/تأمین‌کننده ثبت کنید.")
@@ -196,6 +336,15 @@ class NewPurchaseInvoiceDialog(QDialog):
                 user_id=self.current_user["ID"],
                 items=self.items,
             )
+            # (Phase 13.2) فاکتور با موفقیت ثبت شد؛ Draft مربوطه (در صورت وجود) بسته می‌شود
+            if self.draft_id:
+                try:
+                    draft_service.complete_draft(self.draft_id)
+                except Exception:
+                    logger.exception("خطا در نهایی‌کردن Draft بعد از ثبت فاکتور خرید")
+                finally:
+                    self.draft_id = None
+
             QMessageBox.information(self, "موفق", f"فاکتور خرید شماره {invoice_number} با موفقیت ثبت شد.")
             self.accept()
         except InventoryError as e:
@@ -237,9 +386,10 @@ class ViewInvoiceItemsDialog(QDialog):
 
 
 class PurchaseInvoicesWindow(QWidget):
-    def __init__(self, current_user):
+    def __init__(self, current_user, session_id=None):
         super().__init__()
         self.current_user = current_user
+        self.session_id = session_id  # (Phase 13.2) برای انتقال به فرم فاکتور خرید جدید
         self.setWindowTitle("مدیریت خرید")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.resize(850, 500)
@@ -287,7 +437,7 @@ class PurchaseInvoicesWindow(QWidget):
             self.table.setCellWidget(i, 5, view_btn)
 
     def add_invoice(self):
-        dlg = NewPurchaseInvoiceDialog(self.current_user)
+        dlg = NewPurchaseInvoiceDialog(self.current_user, session_id=self.session_id)
         if dlg.exec():
             self.load_data()
 
