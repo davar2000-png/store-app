@@ -16,6 +16,7 @@
 import sys
 import os
 import pyodbc
+from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import get_connection_string, SQL_DATABASE
@@ -131,6 +132,14 @@ def create_backup(file_path: str):
         raise BackupError(_friendly_error(e))
 
 
+def create_pre_restore_backup() -> str:
+    folder = suggest_backup_folder()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = f"{folder}\StoreAppDB_PreRestore_{timestamp}.bak"
+    create_backup(file_path)
+    return file_path
+
+
 def restore_backup(file_path: str, progress_cb=None):
     """
     دیتابیس StoreAppDB را از فایل پشتیبان مشخص‌شده به‌طور کامل بازیابی می‌کند —
@@ -176,6 +185,9 @@ def restore_backup(file_path: str, progress_cb=None):
         db_exists = _database_exists(cursor, SQL_DATABASE)
 
         if db_exists:
+            _progress("در حال تهیه نسخه پشتیبان اضطراری قبل از بازیابی...")
+            create_pre_restore_backup()
+            _progress("نسخه پشتیبان اضطراری با موفقیت ذخیره شد.")
             _progress("در حال قطع اتصال سایر کاربران برای بازیابی امن...")
             cursor.execute(f"""
                 ALTER DATABASE [{SQL_DATABASE}]
