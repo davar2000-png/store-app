@@ -42,15 +42,14 @@ def save_draft(user_id: int, form_type: str, data: dict,
         db.close()
         return draft_id
     else:
-        db.execute(
+        new_id = db.execute(
             "INSERT INTO Drafts (UserRef, SessionRef, FormType, EntityType, "
             "EntityID, DataJson, Status, CreatedAt, UpdatedAt) "
             "VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', GETDATE(), GETDATE())",
             (user_id, session_id, form_type, entity_type, entity_id, data_json)
         )
-        row = db.fetch_one("SELECT SCOPE_IDENTITY() AS ID")
         db.close()
-        return int(row["ID"]) if row else None
+        return int(new_id) if new_id is not None else None
 
 
 def get_active_drafts(user_id: int, form_type: str = None):

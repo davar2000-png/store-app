@@ -6,8 +6,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QLineEdit, QLabel, QDialog, QFormLayout, QComboBox,
     QDoubleSpinBox, QMessageBox, QHeaderView, QTextEdit
 )
-from PyQt6.QtCore import Qt
-import sys, os
+from PyQt6.QtCore import Qt, QTimer
+import sys, os, logging
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.persian_date import today_shamsi_str
@@ -17,20 +17,38 @@ from services.sales_service import (
 )
 from ui.product_picker_dialog import ProductPickerDialog
 from ui.serial_picker_dialog import SerialPickerDialog
+from services import draft_service
+
+logger = logging.getLogger(__name__)
 
 
 class NewSalesInvoiceDialog(QDialog):
     """فرم ثبت فاکتور فروش جدید"""
 
-    def __init__(self, current_user):
+    DRAFT_FORM_TYPE = "SalesInvoice"
+
+    def __init__(self, current_user, session_id=None):
         super().__init__()
         self.current_user = current_user
-        self.items = []   # هر عنصر: دیکشنری با اطلاعات کالا و سریال‌های انتخاب‌شده
+        self.session_id = session_id
+        self.items = []
+        self.draft_id = None
         self.setWindowTitle("ثبت فاکتور فروش جدید")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.resize(750, 560)
         self._build_ui()
         self.load_customers()
+
+        self._check_for_existing_draft()
+
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setInterval(60000)
+        self.autosave_timer.timeout.connect(self.autosave)
+        self.autosave_timer.start()
+
+        self.finished.connect(
+            lambda _result=None: self.autosave_timer.stop()
+        )
 
     def _build_ui(self):
         layout = QVBoxLayout()
@@ -76,8 +94,14 @@ class NewSalesInvoiceDialog(QDialog):
         save_btn.clicked.connect(self.save_invoice)
         cancel_btn = QPushButton("انصراف")
         cancel_btn.clicked.connect(self.reject)
+
+        self.discard_draft_btn = QPushButton("🗑️ دور ریختن پیش‌نویس")
+        self.discard_draft_btn.clicked.connect(self.discard_recovered_draft)
+        self.discard_draft_btn.setVisible(False)
+
         btn_row.addWidget(save_btn)
         btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(self.discard_draft_btn)
         layout.addLayout(btn_row)
 
         self.setLayout(layout)
@@ -187,6 +211,130 @@ class NewSalesInvoiceDialog(QDialog):
         del self.items[index]
         self.refresh_items_table()
 
+    # ---------------- Draft / AutoSave (Phase 13.4) ----------------
+
+    def _collect_draft_data(self):
+        return {
+            "customer_id": self.customer_combo.currentData(),
+            "discount": self.discount_input.value(),
+            "tax": self.tax_input.value(),
+            "description": self.description_input.toPlainText(),
+            "items": self.items,
+        }
+
+    def _is_form_empty(self):
+        return (
+            not self.items
+            and not self.description_input.toPlainText().strip()
+            and self.discount_input.value() == 0
+            and self.tax_input.value() == 0
+        )
+
+    def _check_for_existing_draft(self):
+        try:
+            drafts = draft_service.get_active_drafts(
+                self.current_user["ID"],
+                form_type=self.DRAFT_FORM_TYPE
+            )
+        except Exception:
+            logger.exception("خطا در بررسی پیش‌نویس‌های موجود فاکتور فروش")
+            return
+
+        if not drafts:
+            return
+
+        draft = drafts[0]
+
+        reply = QMessageBox.question(
+            self,
+            "بازیابی پیش‌نویس",
+            "یک پیش‌نویس ذخیره‌شده از فاکتور فروش قبلی پیدا شد. "
+            "آیا می‌خواهید آن را بازیابی کنید؟",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                self._restore_draft(draft)
+            except Exception:
+                logger.exception("خطا در بازیابی پیش‌نویس فاکتور فروش")
+
+    def _restore_draft(self, draft):
+        data = draft.get("Data") or {}
+
+        customer_id = data.get("customer_id")
+        if customer_id is not None:
+            idx = self.customer_combo.findData(customer_id)
+            if idx >= 0:
+                self.customer_combo.setCurrentIndex(idx)
+
+        self.discount_input.setValue(data.get("discount") or 0)
+        self.tax_input.setValue(data.get("tax") or 0)
+        self.description_input.setPlainText(data.get("description") or "")
+
+        items = data.get("items")
+        if isinstance(items, list):
+            self.items = items
+
+        self.refresh_items_table()
+
+        self.draft_id = draft.get("ID")
+        self.discard_draft_btn.setVisible(bool(self.draft_id))
+
+    def autosave(self):
+        print('>>> SALES AUTOSAVE FIRED | USER =', self.current_user.get('ID'))
+        try:
+            if self._is_form_empty():
+                print('>>> SALES AUTOSAVE SKIPPED | FORM EMPTY')
+                return
+            print('>>> SALES AUTOSAVE SAVING...')
+
+            self.draft_id = draft_service.save_draft(
+                user_id=self.current_user["ID"],
+                form_type=self.DRAFT_FORM_TYPE,
+                data=self._collect_draft_data(),
+                session_id=self.session_id,
+                draft_id=self.draft_id,
+            )
+
+            if self.draft_id:
+                self.discard_draft_btn.setVisible(True)
+
+        except Exception:
+            logger.exception("خطا در AutoSave پیش‌نویس فاکتور فروش")
+
+    def discard_recovered_draft(self):
+        if not self.draft_id:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "دور ریختن پیش‌نویس",
+            "آیا مطمئن هستید می‌خواهید این پیش‌نویس را برای همیشه دور بریزید؟\n"
+            "فرم فعلی پاک خواهد شد.",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            draft_service.discard_draft(self.draft_id)
+        except Exception:
+            logger.exception("خطا در دور ریختن پیش‌نویس فاکتور فروش")
+
+        self.draft_id = None
+        self.discard_draft_btn.setVisible(False)
+        self.items = []
+        self.refresh_items_table()
+        self.discount_input.setValue(0)
+        self.tax_input.setValue(0)
+        self.description_input.clear()
+
     def save_invoice(self):
         if self.customer_combo.count() == 0:
             QMessageBox.warning(self, "خطا", "ابتدا یک مشتری ثبت کنید.")
@@ -205,7 +353,21 @@ class NewSalesInvoiceDialog(QDialog):
                 user_id=self.current_user["ID"],
                 items=self.items,
             )
-            QMessageBox.information(self, "موفق", f"فاکتور فروش شماره {invoice_number} با موفقیت ثبت شد.")
+            if self.draft_id:
+                try:
+                    draft_service.complete_draft(self.draft_id)
+                except Exception:
+                    logger.exception(
+                        "خطا در نهایی‌کردن Draft بعد از ثبت فاکتور فروش"
+                    )
+                finally:
+                    self.draft_id = None
+
+            QMessageBox.information(
+                self,
+                "موفق",
+                f"فاکتور فروش شماره {invoice_number} با موفقیت ثبت شد."
+            )
             self.accept()
         except SalesError as e:
             QMessageBox.warning(self, "خطا", str(e))
@@ -246,9 +408,10 @@ class ViewSalesInvoiceItemsDialog(QDialog):
 
 
 class SalesInvoicesWindow(QWidget):
-    def __init__(self, current_user):
+    def __init__(self, current_user, session_id=None):
         super().__init__()
         self.current_user = current_user
+        self.session_id = session_id
         self.setWindowTitle("مدیریت فروش")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.resize(850, 500)
@@ -296,7 +459,10 @@ class SalesInvoicesWindow(QWidget):
             self.table.setCellWidget(i, 5, view_btn)
 
     def add_invoice(self):
-        dlg = NewSalesInvoiceDialog(self.current_user)
+        dlg = NewSalesInvoiceDialog(
+            self.current_user,
+            session_id=self.session_id
+        )
         if dlg.exec():
             self.load_data()
 

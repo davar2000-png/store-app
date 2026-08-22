@@ -22,14 +22,13 @@ def start_session(user_id: int) -> int:
     باید بلافاصله بعد از ورود موفق کاربر (Login) فراخوانی شود.
     """
     db = Database()
-    db.execute(
+    new_id = db.execute(
         "INSERT INTO Sessions (UserRef, LoginTime, LastHeartbeat, CloseStatus) "
         "VALUES (?, GETDATE(), GETDATE(), 'ACTIVE')",
         (user_id,)
     )
-    row = db.fetch_one("SELECT SCOPE_IDENTITY() AS ID")
     db.close()
-    return int(row["ID"]) if row else None
+    return int(new_id) if new_id is not None else None
 
 
 def heartbeat(session_id: int) -> None:

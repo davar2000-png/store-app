@@ -149,7 +149,10 @@ class MainWindow(QMainWindow):
         self.purchases_win.show()
 
     def open_sales(self):
-        self.sales_win = SalesInvoicesWindow(self.current_user)
+        self.sales_win = SalesInvoicesWindow(
+            self.current_user,
+            session_id=self.session_id
+        )
         self.sales_win.show()
 
     def open_purchase_returns(self):

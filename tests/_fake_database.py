@@ -35,7 +35,7 @@ class FakeDatabase:
             self.__class__.sessions.append(row)
             self.__class__._next_session_id += 1
             self._last_insert_id = row["ID"]
-            return
+            return self._last_insert_id
 
         if normalized.startswith("UPDATE SESSIONS SET LASTHEARTBEAT"):
             session_id = params[0]
@@ -90,7 +90,7 @@ class FakeDatabase:
             self.__class__.drafts.append(row)
             self.__class__._next_draft_id += 1
             self._last_insert_id = row["ID"]
-            return
+            return self._last_insert_id
 
         if normalized.startswith("UPDATE DRAFTS SET DATAJSON"):
             data_json, draft_id, user_id = params
