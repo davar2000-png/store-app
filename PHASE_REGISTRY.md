@@ -23,3 +23,21 @@
 - Crash Detection واقعی در `main.py` (فقط API آماده است)
 - ساخت Branch جداگانه `phase/12-stabilization`
 - Accounting Engine (عمداً خارج از Scope این فاز)
+
+## Phase 13.5.1 — Backup Hardening
+
+**Commit:**
+- `f3aff04` — fix: improve pre restore backup path handling
+
+**تکمیل‌شده:**
+- اضافه شدن `create_pre_restore_backup()` در `services/backup_service.py`
+- ایجاد Backup اضطراری قبل از Restore دیتابیس موجود
+- اتصال Pre-Restore Backup به مسیر `restore_backup()`
+- اصلاح ساخت مسیر فایل Backup با `os.path.join`
+- تست موفق:
+  - `python -m pytest -q tests`
+  - Result: 16 passed
+
+**یادداشت:**
+- فایل `services/backup/legacy_backup_service.py` بررسی شد.
+- هیچ import فعالی از آن پیدا نشد؛ فعلاً حذف نشده و به‌عنوان کد قدیمی باقی می‌ماند.
