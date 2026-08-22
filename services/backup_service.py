@@ -135,7 +135,7 @@ def create_backup(file_path: str):
 def create_pre_restore_backup() -> str:
     folder = suggest_backup_folder()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = f"{folder}\StoreAppDB_PreRestore_{timestamp}.bak"
+    file_path = os.path.join(folder, f"StoreAppDB_PreRestore_{timestamp}.bak")
     create_backup(file_path)
     return file_path
 
