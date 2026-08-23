@@ -58,11 +58,13 @@ def set_setting(key: str, value: str, description: str = None):
     existing = db.fetch_one("SELECT ID FROM Settings WHERE SettingKey = ?", (key,))
     if existing:
         db.execute("UPDATE Settings SET SettingValue = ? WHERE SettingKey = ?", (value, key))
+        create_audit_entry(None, "Update", "Settings", existing["ID"], f"Updated setting: {key}")
     else:
-        db.execute(
+        new_id = db.execute(
             "INSERT INTO Settings (SettingKey, SettingValue, Description) VALUES (?, ?, ?)",
             (key, value, description)
         )
+        create_audit_entry(None, "Create", "Settings", new_id, f"Created setting: {key}")
     db.close()
 
 
