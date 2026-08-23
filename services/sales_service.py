@@ -11,6 +11,80 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db import Database
 from services.audit_service import create_audit_entry
+from services.accounting_service import _post_journal_entry_on_cursor
+
+# --- Chart of Accounts codes استفاده‌شده برای سند حسابداری فروش (Phase 15.2) ---
+# همه این کدها در database/migrations/009_accounting_core.sql Seed شده‌اند،
+# به‌جز ACCOUNT_TAX_PAYABLE که در 010_accounting_tax_payable.sql اضافه شد
+# (چون Chart of Accounts اولیه هیچ حساب بدهی برای مالیات دریافتی نداشت).
+ACCOUNT_ACCOUNTS_RECEIVABLE = "1100"   # حساب‌های دریافتنی (طلب از مشتری)
+ACCOUNT_INVENTORY = "1200"             # موجودی کالا
+ACCOUNT_TAX_PAYABLE = "2200"           # مالیات دریافتنی از مشتری / پرداختنی به سازمان مالیاتی
+ACCOUNT_SALES_REVENUE = "4000"         # درآمد فروش
+ACCOUNT_COGS = "5000"                  # بهای تمام‌شده کالای فروش‌رفته
+
+# مقادیر کوچک‌تر از این، ناشی از خطای گرد شدن اعشار در نظر گرفته می‌شوند و
+# ردیف حسابداری جداگانه‌ای برایشان ساخته نمی‌شود (نه صفر واقعی اقتصادی).
+_ZERO_TOLERANCE = 1e-9
+
+
+def _build_sales_journal_lines(total_amount: float, discount_amount: float, tax_amount: float,
+                                payable: float, total_cost_amount: float) -> list:
+    """
+    ردیف‌های سند حسابداری دوطرفه یک فاکتور فروش را می‌سازد (بدون لمس دیتابیس؛
+    خالص و قابل تست مستقل).
+
+    دو رویداد اقتصادی هم‌زمان در یک سند ترکیبی ثبت می‌شود:
+      ۱) شناسایی درآمد و طلب از مشتری:
+         بدهکار   1100 حساب‌های دریافتنی   = PayableAmount
+         بستانکار 4000 درآمد فروش          = TotalAmount − DiscountAmount
+         بستانکار 2200 مالیات دریافتنی     = TaxAmount (فقط اگر > 0)
+      ۲) شناسایی بهای تمام‌شده کالای فروش‌رفته (از FIFO موجود، بدون تغییر منطق آن):
+         بدهکار   5000 بهای تمام‌شده کالای فروش‌رفته = SUM(CostAmount)
+         بستانکار 1200 موجودی کالا                   = SUM(CostAmount)
+
+    ردیف‌هایی که مبلغشان صفر است (مثلاً TaxAmount = 0) اصلاً ساخته نمی‌شوند؛
+    یک سند با یک ردیف صفر یا یک سند کاملاً خالی (فاکتور با ارزش/بهای صفر)
+    هرگز نباید Post شود — این خودِ همان قانون بنیادی Double-Entry است، نه
+    یک حدس اضافه.
+    """
+    lines = []
+
+    net_revenue = total_amount - float(discount_amount or 0)
+    tax = float(tax_amount or 0)
+
+    if abs(payable) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_ACCOUNTS_RECEIVABLE,
+            "debit": payable,
+            "description": "طلب از مشتری بابت فاکتور فروش",
+        })
+    if abs(net_revenue) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_SALES_REVENUE,
+            "credit": net_revenue,
+            "description": "درآمد فروش",
+        })
+    if abs(tax) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_TAX_PAYABLE,
+            "credit": tax,
+            "description": "مالیات فاکتور فروش",
+        })
+
+    if abs(total_cost_amount) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_COGS,
+            "debit": total_cost_amount,
+            "description": "بهای تمام‌شده کالای فروش‌رفته",
+        })
+        lines.append({
+            "account_code": ACCOUNT_INVENTORY,
+            "credit": total_cost_amount,
+            "description": "کسر موجودی کالا بابت فروش",
+        })
+
+    return lines
 
 
 class SalesError(Exception):
@@ -133,6 +207,8 @@ def create_sales_invoice(customer_id: int, shamsi_date: str, discount_amount: fl
         cursor.execute("SELECT @@IDENTITY AS id")
         invoice_id = int(cursor.fetchone()[0])
 
+        total_cost_amount = 0.0
+
         for item in items:
             product_id = int(item["product_id"])
             qty = float(item["quantity"])
@@ -171,6 +247,8 @@ def create_sales_invoice(customer_id: int, shamsi_date: str, discount_amount: fl
                 cursor.execute("SELECT PurchasePrice FROM Products WHERE ID = ?", (product_id,))
                 last_price = float(cursor.fetchone()[0] or 0)
                 cost_amount += remaining_needed * last_price
+
+            total_cost_amount += cost_amount
 
             cursor.execute(
                 """INSERT INTO SalesInvoiceItems
@@ -227,6 +305,32 @@ def create_sales_invoice(customer_id: int, shamsi_date: str, discount_amount: fl
                    VALUES (?,?,N'Sell',N'SalesInvoices',?,0,?,?,?,?,?)""",
                 (product_id, shamsi_date, invoice_id, qty, price, balance,
                  f"فاکتور فروش شماره {invoice_number}", user_id)
+            )
+
+        # --- ثبت سند حسابداری دوطرفه (Journal Entry) در همان Transaction اتمیک فاکتور ---
+        # عمداً از همان Cursor/Connection فاکتور استفاده می‌شود (نه یک
+        # Connection جدا) تا فاکتور فروش و سند حسابداری آن واقعاً یک واحد
+        # اتمیک باشند: یا هر دو با هم Commit می‌شوند، یا (در صورت هر خطایی،
+        # از جمله موازنه‌نبودن سند یا نبود یک حساب در Chart of Accounts)
+        # با هم کامل Rollback می‌شوند. یک فاکتور فروش بدون سند حسابداری
+        # موازنه‌شده متناظرش، طبق ACCOUNTING_RULES.md هرگز نباید در سیستم
+        # باقی بماند.
+        journal_lines = _build_sales_journal_lines(
+            total_amount=total_amount,
+            discount_amount=discount_amount,
+            tax_amount=tax_amount,
+            payable=payable,
+            total_cost_amount=total_cost_amount,
+        )
+        if journal_lines:
+            _post_journal_entry_on_cursor(
+                cursor,
+                shamsi_date=shamsi_date,
+                description=f"فاکتور فروش شماره {invoice_number}",
+                lines=journal_lines,
+                user_id=user_id,
+                source_table="SalesInvoices",
+                source_id=invoice_id,
             )
 
         conn.commit()
