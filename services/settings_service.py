@@ -103,7 +103,7 @@ def username_exists(username: str, exclude_user_id: int = None) -> bool:
     return row is not None
 
 
-def create_user(username: str, full_name: str, password: str, is_admin: bool) -> int:
+def create_user(username: str, full_name: str, password: str, is_admin: bool, actor_user_id: int = None) -> int:
     if username_exists(username):
         raise ValueError("این نام کاربری قبلاً استفاده شده است.")
     hashed, salt = hash_password(password)
@@ -116,7 +116,7 @@ def create_user(username: str, full_name: str, password: str, is_admin: bool) ->
     db.close()
 
     create_audit_entry(
-        None,
+        actor_user_id,
         "Create",
         "Users",
         new_id,
@@ -126,7 +126,7 @@ def create_user(username: str, full_name: str, password: str, is_admin: bool) ->
     return new_id
 
 
-def update_user(user_id: int, full_name: str, is_admin: bool, is_active: bool):
+def update_user(user_id: int, full_name: str, is_admin: bool, is_active: bool, actor_user_id: int = None):
     db = Database()
     db.execute(
         "UPDATE Users SET FullName = ?, IsAdmin = ?, IsActive = ? WHERE ID = ?",
@@ -135,7 +135,7 @@ def update_user(user_id: int, full_name: str, is_admin: bool, is_active: bool):
     db.close()
 
 
-    create_audit_entry(None, "Update", "Users", user_id, f"Updated user: {full_name}")
+    create_audit_entry(actor_user_id, "Update", "Users", user_id, f"Updated user: {full_name}")
 def reset_user_password(user_id: int, new_password: str):
     hashed, salt = hash_password(new_password)
     db = Database()
