@@ -1,33 +1,56 @@
+import logging
 from datetime import datetime
 import uuid
 
 from database.db import Database
 
+logger = logging.getLogger(__name__)
+
 
 def create_audit_entry(user_id, action_type, table_name, record_id=None, details=None):
+    """
+    یک رکورد Audit ثبت می‌کند و دیکشنری همان رکورد را برمی‌گرداند.
+
+    طراحی عمدی: خطای نوشتن Audit هرگز عملیات اصلی تجاری (فروش/خرید/تسویه) را
+    متوقف یا Rollback نمی‌کند (چون این تابع فقط Best-Effort Logging است، نه
+    بخشی از Transaction حسابداری). اما برخلاف نسخه قبلی، خطا دیگر کاملاً
+    بی‌صدا بلعیده نمی‌شود — با logger.error ثبت می‌شود تا یک شکست خاموش در
+    زنجیره Audit (که مستقیماً روی صحت گزارش‌های امنیتی/حسابداری اثر می‌گذارد)
+    قابل ردیابی باشد. فراخوان می‌تواند با بررسی audit_write_failed در مقدار
+    بازگشتی متوجه شکست شود.
+    """
     correlation_id = str(uuid.uuid4())
+    action_date = datetime.now()
+    audit_write_failed = False
 
     try:
         db = Database()
-        db.execute(
-            """
-            INSERT INTO AuditLogs
-            (UserRef, ActionType, TableName, RecordID, Details, ActionDate, CorrelationID)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                action_type,
-                table_name,
-                record_id,
-                details,
-                datetime.now(),
-                correlation_id
+        try:
+            db.execute(
+                """
+                INSERT INTO AuditLogs
+                (UserRef, ActionType, TableName, RecordID, Details, ActionDate, CorrelationID)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    action_type,
+                    table_name,
+                    record_id,
+                    details,
+                    action_date,
+                    correlation_id
+                )
             )
-        )
-        db.close()
+        finally:
+            db.close()
     except Exception:
-        pass
+        audit_write_failed = True
+        logger.error(
+            "Audit write failed: user=%s action=%s table=%s record=%s correlation=%s",
+            user_id, action_type, table_name, record_id, correlation_id,
+            exc_info=True,
+        )
 
     return {
         "UserRef": user_id,
@@ -35,8 +58,9 @@ def create_audit_entry(user_id, action_type, table_name, record_id=None, details
         "TableName": table_name,
         "RecordID": record_id,
         "Details": details,
-        "ActionDate": datetime.now(),
-        "CorrelationID": correlation_id
+        "ActionDate": action_date,
+        "CorrelationID": correlation_id,
+        "audit_write_failed": audit_write_failed,
     }
 
 

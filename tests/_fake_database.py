@@ -6,8 +6,14 @@ import copy
 class FakeDatabase:
     sessions = []
     drafts = []
+    audit_logs = []
     _next_session_id = 1
     _next_draft_id = 1
+    _next_audit_id = 1
+
+    #: وقتی True باشد، execute برای INSERT INTO AuditLogs یک خطا شبیه‌سازی
+    #: می‌کند تا رفتار create_audit_entry در برابر شکست DB تست شود.
+    fail_audit_insert = False
 
     def __init__(self):
         self._last_insert_id = None
@@ -16,8 +22,11 @@ class FakeDatabase:
     def reset(cls):
         cls.sessions = []
         cls.drafts = []
+        cls.audit_logs = []
         cls._next_session_id = 1
         cls._next_draft_id = 1
+        cls._next_audit_id = 1
+        cls.fail_audit_insert = False
 
     def execute(self, sql, params=()):
         normalized = " ".join(sql.split()).upper()
@@ -116,6 +125,29 @@ class FakeDatabase:
             self._set_draft_status(params[0], "COMPLETED")
             return
 
+        if normalized.startswith("INSERT INTO AUDITLOGS"):
+            if self.__class__.fail_audit_insert:
+                raise RuntimeError("simulated AuditLogs insert failure")
+
+            (
+                user_ref, action_type, table_name, record_id,
+                details, action_date, correlation_id,
+            ) = params
+            row = {
+                "ID": self.__class__._next_audit_id,
+                "UserRef": user_ref,
+                "ActionType": action_type,
+                "TableName": table_name,
+                "RecordID": record_id,
+                "Details": details,
+                "ActionDate": action_date,
+                "CorrelationID": correlation_id,
+            }
+            self.__class__.audit_logs.append(row)
+            self.__class__._next_audit_id += 1
+            self._last_insert_id = row["ID"]
+            return self._last_insert_id
+
         raise AssertionError(f"Unsupported SQL: {sql}")
 
     def fetch_one(self, sql, params=()):
@@ -159,6 +191,11 @@ class FakeDatabase:
                     and row["Status"] == "ACTIVE"
                 ]
 
+            rows.sort(key=lambda row: row["ID"], reverse=True)
+            return rows
+
+        if "FROM AUDITLOGS" in normalized:
+            rows = [copy.deepcopy(row) for row in self.__class__.audit_logs]
             rows.sort(key=lambda row: row["ID"], reverse=True)
             return rows
 
