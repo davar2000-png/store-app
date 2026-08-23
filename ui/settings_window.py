@@ -91,10 +91,11 @@ class GeneralTab(QWidget):
 # دیالوگ افزودن / ویرایش کاربر
 # =========================================================
 class UserDialog(QDialog):
-    def __init__(self, user=None, is_self=False):
+    def __init__(self, user=None, is_self=False, current_user_id=None):
         super().__init__()
         self.user = user
         self.is_self = is_self  # آیا کاربر در حال ویرایش، همان کاربر لاگین‌کرده است؟
+        self.current_user_id = current_user_id
         self.setWindowTitle("ویرایش کاربر" if user else "افزودن کاربر جدید")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.setFixedWidth(400)
@@ -154,7 +155,8 @@ class UserDialog(QDialog):
             if self.user:
                 ss.update_user(
                     self.user["ID"], full_name,
-                    self.is_admin.isChecked(), self.is_active.isChecked()
+                    self.is_admin.isChecked(), self.is_active.isChecked(),
+                    actor_user_id=self.current_user_id
                 )
                 if password:
                     ss.reset_user_password(self.user["ID"], password)
@@ -162,7 +164,7 @@ class UserDialog(QDialog):
                 if not password:
                     QMessageBox.warning(self, "خطا", "برای کاربر جدید، رمز عبور الزامی است.")
                     return
-                ss.create_user(username, full_name, password, self.is_admin.isChecked())
+                ss.create_user(username, full_name, password, self.is_admin.isChecked(), actor_user_id=self.current_user_id)
         except ValueError as e:
             QMessageBox.warning(self, "خطا", str(e))
             return
@@ -217,12 +219,12 @@ class UsersTab(QWidget):
             self.table.setCellWidget(i, 5, edit_btn)
 
     def add_user(self):
-        dlg = UserDialog()
+        dlg = UserDialog(current_user_id=self.current_user["ID"])
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.load_users()
 
     def edit_user(self, user):
-        dlg = UserDialog(user, is_self=(user["ID"] == self.current_user["ID"]))
+        dlg = UserDialog(user, is_self=(user["ID"] == self.current_user["ID"]), current_user_id=self.current_user["ID"])
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.load_users()
 
