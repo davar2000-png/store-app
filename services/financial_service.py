@@ -10,12 +10,81 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db import Database
 from services.audit_service import create_audit_entry
+from services.accounting_service import _post_journal_entry_on_cursor
 from utils.persian_date import add_months_shamsi
+
+# --- Chart of Accounts codes استفاده‌شده برای سند حسابداری دریافت (Phase 15.4) ---
+# 1000/1100/1300 در 009_accounting_core.sql از قبل Seed شده‌اند؛ 2300 در
+# 012_receipt_accounting.sql (Phase 15.4) اضافه شد — طبق تصمیم صریح
+# Option F.2 برای نمایش مانده تخصیص‌نیافته دریافت به‌عنوان یک بدهی
+# (پیش‌دریافت مشتری)، مجزا از 1100 (طلب از مشتری، ماهیت معکوس).
+ACCOUNT_CASH_BANK = "1000"          # صندوق و بانک (دریافت نقد + بانک)
+ACCOUNT_NOTES_RECEIVABLE = "1300"   # اسناد دریافتنی (چک‌های نزد ما)
+ACCOUNT_ACCOUNTS_RECEIVABLE = "1100"  # حساب‌های دریافتنی (طلب از مشتری)
+ACCOUNT_CUSTOMER_ADVANCES = "2300"  # دریافت علی‌الحساب مشتریان (پیش‌دریافت)
+
+# مقادیر کوچک‌تر از این، ناشی از خطای گرد شدن اعشار در نظر گرفته می‌شوند و
+# ردیف حسابداری جداگانه‌ای برایشان ساخته نمی‌شود (نه صفر واقعی اقتصادی).
+_ZERO_TOLERANCE = 1e-9
 
 
 class FinancialError(Exception):
     """خطای قابل‌فهم برای نمایش به کاربر (نه خطای فنی دیتابیس)"""
     pass
+
+
+def _build_receipt_journal_lines(cash_amount: float, bank_amount: float, cheque_amount: float,
+                                  alloc_sum: float, total_amount: float) -> list:
+    """
+    ردیف‌های سند حسابداری دوطرفه یک سند دریافت وجه را می‌سازد (بدون لمس
+    دیتابیس؛ خالص و قابل تست مستقل) — طبق تصمیم صریح Option F.2:
+
+        بدهکار   1000 صندوق و بانک        = Cash + Bank
+        بدهکار   1300 اسناد دریافتنی      = Cheque
+        بستانکار 1100 حساب‌های دریافتنی   = alloc_sum (فقط مبلغ تخصیص‌یافته)
+        بستانکار 2300 پیش‌دریافت مشتریان = total_amount − alloc_sum (مازاد تخصیص‌نیافته)
+
+    برای دریافت‌های کاملاً تخصیص‌یافته (total_amount == alloc_sum) هیچ
+    ردیف 2300 ساخته نمی‌شود. مبلغ کامل هرگز به‌طور کامل به 1100 بستانکار
+    نمی‌شود اگر alloc_sum کمتر از total_amount باشد — این دقیقاً همان
+    قانونی است که این تابع تضمین می‌کند.
+
+    ردیف‌هایی که مبلغشان صفر است اصلاً ساخته نمی‌شوند؛ یک سند با ردیف صفر
+    یا یک سند کاملاً خالی هرگز نباید Post شود.
+    """
+    lines = []
+
+    debit_cash_bank = float(cash_amount or 0) + float(bank_amount or 0)
+    debit_notes = float(cheque_amount or 0)
+    credit_receivable = float(alloc_sum or 0)
+    credit_advance = float(total_amount or 0) - float(alloc_sum or 0)
+
+    if abs(debit_cash_bank) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_CASH_BANK,
+            "debit": debit_cash_bank,
+            "description": "دریافت نقد/بانک بابت سند دریافت",
+        })
+    if abs(debit_notes) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_NOTES_RECEIVABLE,
+            "debit": debit_notes,
+            "description": "دریافت چک بابت سند دریافت",
+        })
+    if abs(credit_receivable) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_ACCOUNTS_RECEIVABLE,
+            "credit": credit_receivable,
+            "description": "تسویه طلب از مشتری بابت تخصیص دریافت",
+        })
+    if abs(credit_advance) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_CUSTOMER_ADVANCES,
+            "credit": credit_advance,
+            "description": "مانده تخصیص‌نیافته دریافت (پیش‌دریافت مشتری)",
+        })
+
+    return lines
 
 
 # =========================================================
@@ -300,6 +369,10 @@ def create_receipt(customer_id: int, shamsi_date: str, description: str, user_id
         cursor.execute("SELECT @@IDENTITY AS id")
         receipt_id = int(cursor.fetchone()[0])
 
+        cash_amount_total = 0.0
+        bank_amount_total = 0.0
+        cheque_amount_total = 0.0
+
         for line in lines:
             method = line["method"]
             amount = float(line["amount"])
@@ -320,6 +393,7 @@ def create_receipt(customer_id: int, shamsi_date: str, description: str, user_id
                     (cash_box_id, amount, balance, receipt_id, shamsi_date,
                      f"دریافت وجه سند شماره {receipt_number}", user_id)
                 )
+                cash_amount_total += amount
 
             elif method == "Bank":
                 bank_account_id = int(line["bank_account_id"])
@@ -333,12 +407,14 @@ def create_receipt(customer_id: int, shamsi_date: str, description: str, user_id
                     (bank_account_id, amount, balance, receipt_id, shamsi_date,
                      f"دریافت وجه سند شماره {receipt_number}", user_id)
                 )
+                bank_amount_total += amount
 
             elif method == "Cheque":
                 cheque_info = dict(line["cheque"])
                 cheque_info["amount"] = amount
                 cheque_id = _insert_cheque(cursor, "Received", cheque_info, customer_id, "Receipts", user_id)
                 cursor.execute("UPDATE Cheques SET RefID = ? WHERE ID = ?", (receipt_id, cheque_id))
+                cheque_amount_total += amount
 
             else:
                 raise FinancialError("روش دریافت نامعتبر است.")
@@ -361,6 +437,30 @@ def create_receipt(customer_id: int, shamsi_date: str, description: str, user_id
             cursor.execute(
                 "UPDATE SalesInvoices SET PaidAmount = PaidAmount + ? WHERE ID = ?",
                 (amount, invoice_id)
+            )
+
+        # --- ثبت سند حسابداری دوطرفه (Journal Entry) در همان Transaction اتمیک سند دریافت ---
+        # عمداً از همان Cursor/Connection سند دریافت استفاده می‌شود (نه یک
+        # Connection جدا) تا سند دریافت و سند حسابداری آن واقعاً یک واحد
+        # اتمیک باشند: یا هر دو با هم Commit می‌شوند، یا (در صورت هر خطایی،
+        # از جمله موازنه‌نبودن سند یا نبود یک حساب در Chart of Accounts)
+        # با هم کامل Rollback می‌شوند، طبق تصمیم صریح Option F.2.
+        journal_lines = _build_receipt_journal_lines(
+            cash_amount=cash_amount_total,
+            bank_amount=bank_amount_total,
+            cheque_amount=cheque_amount_total,
+            alloc_sum=alloc_sum,
+            total_amount=total_amount,
+        )
+        if journal_lines:
+            _post_journal_entry_on_cursor(
+                cursor,
+                shamsi_date=shamsi_date,
+                description=f"سند دریافت شماره {receipt_number}",
+                lines=journal_lines,
+                user_id=user_id,
+                source_table="Receipts",
+                source_id=receipt_id,
             )
 
         conn.commit()
