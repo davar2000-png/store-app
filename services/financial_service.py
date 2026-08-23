@@ -132,6 +132,8 @@ def manual_cash_box_transaction(cash_box_id: int, tx_type: str, amount: float,
             (cash_box_id, tx_type, amount, new_balance, shamsi_date, description or "", user_id)
         )
         conn.commit()
+
+
     except Exception:
         conn.rollback()
         raise
@@ -589,6 +591,9 @@ def change_cheque_status(cheque_id: int, new_status: str, shamsi_date: str, user
         )
 
         conn.commit()
+
+        create_audit_entry(user_id, "Update", "Cheques", cheque_id, f"Cheque {cheque_number} status changed to {new_status}")
+
     except Exception:
         conn.rollback()
         raise
