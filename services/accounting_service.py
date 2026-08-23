@@ -141,69 +141,103 @@ def _validate_journal_lines(lines):
     return total_debit
 
 
+def _post_journal_entry_on_cursor(cursor, shamsi_date: str, description: str, lines: list,
+                                   user_id: int, source_table: str = None, source_id: int = None,
+                                   correlation_id: str = None):
+    """
+    هسته ثبت سند حسابداری، روی یک Cursor از پیش بازِ متعلق به فراخوان.
+
+    عمداً هیچ commit/rollback/close ای اینجا انجام نمی‌شود — مدیریت
+    Transaction کاملاً بر عهده فراخوان است. این تابع برای دو حالت استفاده
+    می‌شود:
+    ۱) `post_journal_entry()` پایین همین فایل (Connection/Transaction
+       مستقل خودش، برای فراخوانی مستقل از یک رویداد تجاری دیگر).
+    ۲) سرویس‌های تجاری (مثل `sales_service.create_sales_invoice`) که باید
+       سند حسابداری را در همان Transaction اتمیک رویداد تجاری ثبت کنند —
+       تا فروش و سند حسابداری آن واقعاً یک واحد اتمیک باشند (یا هر دو
+       Commit می‌شوند یا هیچ‌کدام)، نه دو Commit جداگانه روی دو Connection
+       که هیچ تضمین اتمیکی با هم ندارند.
+
+    lines: لیستی از دیکشنری با کلیدهای:
+        account_code (یا account_id), debit (اختیاری), credit (اختیاری),
+        description (اختیاری، برای هر ردیف)
+
+    برمی‌گرداند: (journal_entry_id, entry_number)
+    """
+    _validate_journal_lines(lines)
+
+    cursor.execute("SELECT ISNULL(MAX(EntryNumber), 0) + 1 AS NextNum FROM JournalEntries")
+    entry_number = int(cursor.fetchone()[0])
+
+    cursor.execute(
+        """INSERT INTO JournalEntries
+           (EntryNumber, ShamsiDate, Description, SourceTable, SourceID, CorrelationID, UserRef)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (entry_number, shamsi_date, description or "", source_table, source_id,
+         correlation_id, user_id)
+    )
+    cursor.execute("SELECT @@IDENTITY AS id")
+    entry_id = int(cursor.fetchone()[0])
+
+    for line in lines:
+        account_code = line.get("account_code")
+        account_id = line.get("account_id")
+
+        if account_id is None:
+            cursor.execute("SELECT ID, IsActive FROM ChartOfAccounts WHERE Code = ?", (account_code,))
+            row = cursor.fetchone()
+            if not row:
+                raise AccountingError(f"حساب با کد «{account_code}» یافت نشد.")
+            account_id, is_active = int(row[0]), row[1]
+        else:
+            cursor.execute("SELECT ID, IsActive FROM ChartOfAccounts WHERE ID = ?", (account_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise AccountingError(f"حساب با شناسه «{account_id}» یافت نشد.")
+            is_active = row[1]
+
+        if not is_active:
+            raise AccountingError(f"حساب انتخاب‌شده غیرفعال است (Code/ID: {account_code or account_id}).")
+
+        cursor.execute(
+            """INSERT INTO JournalEntryLines (JournalEntryRef, AccountRef, Debit, Credit, Description)
+               VALUES (?, ?, ?, ?, ?)""",
+            (entry_id, account_id, float(line.get("debit") or 0),
+             float(line.get("credit") or 0), line.get("description") or "")
+        )
+
+    return entry_id, entry_number
+
+
 def post_journal_entry(shamsi_date: str, description: str, lines: list, user_id: int,
                         source_table: str = None, source_id: int = None,
                         correlation_id: str = None):
     """
     یک سند حسابداری موازنه‌شده ثبت می‌کند (سربرگ + همه ردیف‌ها به‌صورت اتمیک:
-    یا کامل ثبت می‌شود یا هیچ‌چیز).
+    یا کامل ثبت می‌شود یا هیچ‌چیز)، با Connection/Transaction مستقل خودش.
+
+    برای فراخوانی مستقل مناسب است (مثلاً یک سند دستی از UI آینده). اگر
+    سند باید بخشی از Transaction یک رویداد تجاری دیگر باشد (مثل فروش)،
+    به‌جای این تابع از `_post_journal_entry_on_cursor` با Cursor موجود آن
+    رویداد استفاده کنید تا اتمیک واقعی حفظ شود.
 
     lines: لیستی از دیکشنری با کلیدهای:
         account_code (یا account_id), debit (اختیاری), credit (اختیاری),
         description (اختیاری، برای هر ردیف)
 
     source_table/source_id: ارجاع اختیاری به سند مبدأ تجاری (مثلاً
-    ("SalesInvoices", 123)) — برای فازهای بعد که این را به تراکنش‌های
-    واقعی وصل می‌کنند. اختیاری است چون این Phase هنوز چیزی را وصل نمی‌کند.
+    ("SalesInvoices", 123)).
 
     برمی‌گرداند: (journal_entry_id, entry_number)
     """
-    _validate_journal_lines(lines)
-
     db = Database()
     conn = db.connect()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT ISNULL(MAX(EntryNumber), 0) + 1 AS NextNum FROM JournalEntries")
-        entry_number = int(cursor.fetchone()[0])
-
-        cursor.execute(
-            """INSERT INTO JournalEntries
-               (EntryNumber, ShamsiDate, Description, SourceTable, SourceID, CorrelationID, UserRef)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (entry_number, shamsi_date, description or "", source_table, source_id,
-             correlation_id, user_id)
+        entry_id, entry_number = _post_journal_entry_on_cursor(
+            cursor, shamsi_date, description, lines, user_id,
+            source_table, source_id, correlation_id
         )
-        cursor.execute("SELECT @@IDENTITY AS id")
-        entry_id = int(cursor.fetchone()[0])
-
-        for line in lines:
-            account_code = line.get("account_code")
-            account_id = line.get("account_id")
-
-            if account_id is None:
-                cursor.execute("SELECT ID, IsActive FROM ChartOfAccounts WHERE Code = ?", (account_code,))
-                row = cursor.fetchone()
-                if not row:
-                    raise AccountingError(f"حساب با کد «{account_code}» یافت نشد.")
-                account_id, is_active = int(row[0]), row[1]
-            else:
-                cursor.execute("SELECT ID, IsActive FROM ChartOfAccounts WHERE ID = ?", (account_id,))
-                row = cursor.fetchone()
-                if not row:
-                    raise AccountingError(f"حساب با شناسه «{account_id}» یافت نشد.")
-                is_active = row[1]
-
-            if not is_active:
-                raise AccountingError(f"حساب انتخاب‌شده غیرفعال است (Code/ID: {account_code or account_id}).")
-
-            cursor.execute(
-                """INSERT INTO JournalEntryLines (JournalEntryRef, AccountRef, Debit, Credit, Description)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (entry_id, account_id, float(line.get("debit") or 0),
-                 float(line.get("credit") or 0), line.get("description") or "")
-            )
-
         conn.commit()
     except Exception:
         conn.rollback()
