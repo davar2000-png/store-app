@@ -9,6 +9,7 @@
 | 13 / 13.5.1 | AutoSave/Draft Recovery در UI واقعی + Backup Hardening | Completed | 16 تست موفق |
 | 14 | Audit Trail (Actor, Permission Changes, Password Changes, Audit Viewer, `audit.view` Permission با Fail-Closed) | Completed | Commit `66b5632` |
 | 14.3 | Audit Reliability Hardening (رفع Bug بلعیدن بی‌صدای خطای نوشتن Audit) | Completed | جزئیات پایین |
+| 15.1 | Accounting Core Foundation (Chart of Accounts + Journal Entries دوطرفه، هنوز وصل‌نشده) | Completed | جزئیات پایین |
 
 ## Phase 12 — جزئیات
 
@@ -86,6 +87,55 @@ Exception همچنان به بیرون Propagate نمی‌شود — شکست ن
   ناهم‌خوانی معماری نیست؛ تغییرش یک بازطراحی معماری سراسری می‌شود که طبق
   قانون «از تغییرات نمایشی/بازطراحی غیرضروری خودداری کن» خارج از Scope
   حداقلی این Phase گذاشته شد.
+
+## Phase 15.1 — Accounting Core Foundation
+
+**Commit:** `fd8c811` (روی برنچ `phase/14-workflow-audit`)
+
+**تحلیل وضعیت واقعی قبل از شروع (طبق دستور Brief):**
+بررسی کامل `database/migrations/*.sql` و `services/financial_service.py`,
+`services/sales_service.py`, `services/inventory_service.py` نشان داد:
+- **هیچ Chart of Accounts یا Journal Entry دوطرفه‌ای در کل پروژه وجود ندارد.**
+- آنچه از قبل وجود دارد، مجموعه‌ای از Sub-Ledgerهای تک‌طرفه ولی خوب‌ساخته
+  است: `CashBoxTransactions`/`BankTransactions` با `BalanceAfter` در حال
+  رشد، `SalesInvoices`/`PurchaseInvoices.PaidAmount` برای بدهکار/بستانکار
+  اشخاص، و بهای تمام‌شده FIFO که از قبل به‌ازای هر ردیف فروش محاسبه و در
+  `SalesInvoiceItems.CostAmount` ذخیره می‌شود.
+- هیچ‌کدام از این‌ها به یک Ledger موازنه‌شده (بدهکار=بستانکار) Post
+  نمی‌شوند.
+- این نتیجه‌گیری با یادداشت قدیمی `PHASE_REGISTRY.md § Phase 12`
+  («Accounting Engine — عمداً خارج از Scope») هم‌خوانی داشت.
+
+**تصمیم Scope (طبق دستور «زیرمرحله مستقل، نه همه‌چیز یک‌جا»):**
+این فاز فقط **موتور** حسابداری دوطرفه را می‌سازد؛ به‌صورت عمدی به هیچ
+تراکنش تجاری موجود وصل نمی‌شود. اتصال واقعی (فروش، خرید، دریافت، پرداخت،
+...) در فازهای 15.2 به بعد انجام می‌شود تا هر اتصال جداگانه قابل تست و
+Rollback باشد.
+
+**ساخته‌شده:**
+- `database/migrations/009_accounting_core.sql`: `ChartOfAccounts`,
+  `JournalEntries` (سربرگ)، `JournalEntryLines` (اقلام بدهکار/بستانکار)
+  + یک Chart of Accounts حداقلی Seed شده (صندوق/بانک، دریافتنی‌ها،
+  موجودی کالا، پرداختنی‌ها، اسناد دریافتنی/پرداختنی، حقوق صاحبان سرمایه،
+  درآمد فروش، برگشت از فروش، بهای تمام‌شده کالای فروش‌رفته).
+- `services/accounting_service.py`: `post_journal_entry()` با اعتبارسنجی
+  کامل قبل از لمس دیتابیس (حداقل ۲ ردیف، هر ردیف فقط یک طرف بدهکار/
+  بستانکار، جمع بدهکار = جمع بستانکار با تلورانس گرد شدن، همه حساب‌ها باید
+  وجود و فعال باشند)، اتمیک (Commit/Rollback مطابق الگوی خود پروژه در
+  `financial_service.py`)، و برای هر سند با `create_audit_entry` موجود
+  (نه یک سیستم Audit موازی) ثبت Log می‌شود.
+- ۱۴ تست جدید در `tests/test_accounting_service.py` (قوانین اعتبارسنجی
+  خالص + یک Fake Cursor/Connection سبک برای مسیر واقعی دیتابیس، شامل
+  تست Rollback کامل در صورت شکست).
+- `services.accounting_service` به لیست Import در `test_smoke.py` اضافه شد.
+
+**تست:** `python -m pytest -q tests` → **35 passed** (۲۱ قبلی + ۱۴ جدید).
+
+**عمداً در این فاز انجام نشد:**
+- هیچ سرویس موجودی (`financial_service`, `sales_service`,
+  `inventory_service`) به `post_journal_entry` وصل نشده.
+- هیچ رابط UI (Ledger Viewer) ساخته نشده — طبق اولویت پروژه (UI آخرین
+  اولویت است) و چون هنوز هیچ سند واقعی Post نشده که چیزی برای نمایش باشد.
 
 ## Verification Update — Session Recovery Review
 
