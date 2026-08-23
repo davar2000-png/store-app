@@ -11,11 +11,76 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db import Database
 from services.audit_service import create_audit_entry
+from services.accounting_service import _post_journal_entry_on_cursor
+
+# --- Chart of Accounts codes استفاده‌شده برای سند حسابداری خرید (Phase 15.3) ---
+# طبق تصمیم صریح Option C: FIFO و ProductPurchaseLayers.UnitPrice دست‌نخورده
+# می‌مانند (همچنان قیمت خام واحد را نگه می‌دارند)؛ این کدها فقط برای سند
+# حسابداری دوطرفه استفاده می‌شوند، نه برای تغییر منطق موجودی/FIFO.
+# 1200/2000 در 009_accounting_core.sql Seed شده‌اند؛ 1400/5100 در
+# 011_purchase_accounting.sql (Phase 15.3) اضافه شدند.
+ACCOUNT_INVENTORY = "1200"          # موجودی کالا
+ACCOUNT_PURCHASE_TAX = "1400"       # مالیات خرید / مالیات قابل کسر
+ACCOUNT_PURCHASE_DISCOUNT = "5100"  # تخفیف خرید (Contra-Purchase)
+ACCOUNT_ACCOUNTS_PAYABLE = "2000"   # حساب‌های پرداختنی (بستانکاران/تأمین‌کنندگان)
+
+# مقادیر کوچک‌تر از این، ناشی از خطای گرد شدن اعشار در نظر گرفته می‌شوند و
+# ردیف حسابداری جداگانه‌ای برایشان ساخته نمی‌شود (نه صفر واقعی اقتصادی).
+_ZERO_TOLERANCE = 1e-9
 
 
 class InventoryError(Exception):
     """خطای قابل‌فهم برای نمایش به کاربر (نه خطای فنی دیتابیس)"""
     pass
+
+
+def _build_purchase_journal_lines(inventory_amount: float, tax_amount: float,
+                                   discount_total: float, payable: float) -> list:
+    """
+    ردیف‌های سند حسابداری دوطرفه یک فاکتور خرید را می‌سازد (بدون لمس
+    دیتابیس؛ خالص و قابل تست مستقل) — طبق تصمیم صریح Option C:
+
+        بدهکار   1200 موجودی کالا       = SUM(quantity × raw_unit_price)
+        بدهکار   1400 مالیات خرید       = TaxAmount
+        بستانکار 5100 تخفیف خرید        = SUM(تخفیف قلمی) + تخفیف سربرگ
+        بستانکار 2000 حساب‌های پرداختنی = PayableAmount
+
+    inventory_amount عمداً SUM(quantity × raw_unit_price) است (نه خالص
+    پس از تخفیف) چون ProductPurchaseLayers.UnitPrice قیمت خام را نگه
+    می‌دارد؛ اثر تخفیف به‌طور جداگانه در ردیف 5100 ثبت می‌شود تا این سند
+    با خودِ لایه‌های FIFO (که دست‌نخورده می‌مانند) سازگار بماند.
+
+    ردیف‌هایی که مبلغشان صفر است اصلاً ساخته نمی‌شوند؛ یک سند با ردیف صفر
+    یا یک سند کاملاً خالی هرگز نباید Post شود.
+    """
+    lines = []
+
+    if abs(inventory_amount) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_INVENTORY,
+            "debit": inventory_amount,
+            "description": "افزایش موجودی کالا بابت خرید",
+        })
+    if abs(tax_amount) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_PURCHASE_TAX,
+            "debit": tax_amount,
+            "description": "مالیات قابل کسر فاکتور خرید",
+        })
+    if abs(discount_total) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_PURCHASE_DISCOUNT,
+            "credit": discount_total,
+            "description": "تخفیف فاکتور خرید",
+        })
+    if abs(payable) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_ACCOUNTS_PAYABLE,
+            "credit": payable,
+            "description": "بدهی به تأمین‌کننده بابت فاکتور خرید",
+        })
+
+    return lines
 
 
 def get_suppliers():
@@ -142,10 +207,13 @@ def create_purchase_invoice(supplier_id: int, shamsi_date: str, discount_amount:
     conn = db.connect()
     cursor = conn.cursor()
     try:
-        total_amount = sum(
-            float(i["quantity"]) * float(i["unit_price"]) - float(i.get("discount", 0) or 0)
-            for i in items
-        )
+        # inventory_amount: SUM(quantity × raw_unit_price) — بدون کسر تخفیف،
+        # چون ProductPurchaseLayers.UnitPrice (پایین‌تر) هم قیمت خام را نگه
+        # می‌دارد؛ اثر تخفیف جداگانه در item_discount_total محاسبه و در سند
+        # حسابداری به حساب 5100 (تخفیف خرید) می‌رود، نه از موجودی کم می‌شود.
+        inventory_amount = sum(float(i["quantity"]) * float(i["unit_price"]) for i in items)
+        item_discount_total = sum(float(i.get("discount", 0) or 0) for i in items)
+        total_amount = inventory_amount - item_discount_total
         payable = total_amount - float(discount_amount or 0) + float(tax_amount or 0)
 
         cursor.execute("SELECT ISNULL(MAX(InvoiceNumber), 1000) + 1 AS NextNum FROM PurchaseInvoices")
@@ -218,6 +286,29 @@ def create_purchase_invoice(supplier_id: int, shamsi_date: str, discount_amount:
                    VALUES (?,?,N'Buy',N'PurchaseInvoices',?,?,0,?,?,?,?)""",
                 (product_id, shamsi_date, invoice_id, qty, price, balance,
                  f"فاکتور خرید شماره {invoice_number}", user_id)
+            )
+
+        # --- ثبت سند حسابداری دوطرفه (Journal Entry) در همان Transaction اتمیک فاکتور ---
+        # عمداً از همان Cursor/Connection فاکتور استفاده می‌شود (نه یک
+        # Connection جدا) تا فاکتور خرید و سند حسابداری آن واقعاً یک واحد
+        # اتمیک باشند: یا هر دو با هم Commit می‌شوند، یا (در صورت هر خطایی،
+        # از جمله موازنه‌نبودن سند یا نبود یک حساب در Chart of Accounts)
+        # با هم کامل Rollback می‌شوند.
+        journal_lines = _build_purchase_journal_lines(
+            inventory_amount=inventory_amount,
+            tax_amount=float(tax_amount or 0),
+            discount_total=item_discount_total + float(discount_amount or 0),
+            payable=payable,
+        )
+        if journal_lines:
+            _post_journal_entry_on_cursor(
+                cursor,
+                shamsi_date=shamsi_date,
+                description=f"فاکتور خرید شماره {invoice_number}",
+                lines=journal_lines,
+                user_id=user_id,
+                source_table="PurchaseInvoices",
+                source_id=invoice_id,
             )
 
         conn.commit()
