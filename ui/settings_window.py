@@ -233,8 +233,9 @@ class UsersTab(QWidget):
 # تب دسترسی کاربران به بخش‌ها
 # =========================================================
 class PermissionsTab(QWidget):
-    def __init__(self):
+    def __init__(self, current_user):
         super().__init__()
+        self.current_user = current_user
         self._build_ui()
         self.load_users()
 
@@ -297,7 +298,7 @@ class PermissionsTab(QWidget):
             QMessageBox.warning(self, "توجه", "هیچ کاربری برای تنظیم دسترسی انتخاب نشده است.")
             return
         permissions = {key: cb.isChecked() for key, cb in self.checkboxes.items()}
-        ss.save_user_permissions(user_id, permissions)
+        ss.save_user_permissions(user_id, permissions, actor_user_id=self.current_user["ID"])
         QMessageBox.information(self, "ذخیره شد", "دسترسی‌های این کاربر با موفقیت ذخیره شد.")
 
 
@@ -318,6 +319,6 @@ class SettingsWindow(QWidget):
         tabs = QTabWidget()
         tabs.addTab(GeneralTab(), "🏪 تنظیمات عمومی")
         tabs.addTab(UsersTab(self.current_user), "👥 مدیریت کاربران")
-        tabs.addTab(PermissionsTab(), "🔐 دسترسی به بخش‌ها")
+        tabs.addTab(PermissionsTab(self.current_user), "🔐 دسترسی به بخش‌ها")
         layout.addWidget(tabs)
         self.setLayout(layout)

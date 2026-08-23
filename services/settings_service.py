@@ -159,7 +159,7 @@ def get_user_permissions(user_id: int) -> dict:
     return {r["PermissionKey"]: bool(r["IsAllowed"]) for r in rows}
 
 
-def save_user_permissions(user_id: int, permissions: dict):
+def save_user_permissions(user_id: int, permissions: dict, actor_user_id: int = None):
     """permissions: {PermissionKey: True/False} — برای همه کلیدهای MODULE_PERMISSIONS ذخیره می‌شود."""
     db = Database()
     for key, allowed in permissions.items():
@@ -178,6 +178,7 @@ def save_user_permissions(user_id: int, permissions: dict):
                 (user_id, key, 1 if allowed else 0)
             )
     db.close()
+    create_audit_entry(actor_user_id, "Update", "UserPermissions", user_id, f"Updated permissions for user {user_id}")
 
 
 def is_module_allowed(user: dict, module_key: str) -> bool:
