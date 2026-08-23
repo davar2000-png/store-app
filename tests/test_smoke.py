@@ -34,6 +34,7 @@ SERVICE_MODULES = [
     "services.reports_service",
     "services.assistant_service",
     "services.robat_import_service",
+    "services.accounting_service",
 ]
 
 UTIL_MODULES = [
