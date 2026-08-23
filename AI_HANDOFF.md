@@ -4,69 +4,86 @@
 > اعتماد نکنید — GitHub مرجع اصلی است.
 
 ## LAST ACCOUNT
-Claude Sonnet 5 (همین مکالمه)
+Claude (Phase 14.3 — Audit Reliability Hardening)
 
 ## CURRENT PHASE
-12 — Stabilization + GitHub Normalization + Power Failure Foundation
+14.3 — تکمیل‌شده (روی برنچ `phase/14-workflow-audit`)
+
+## CURRENT BRANCH
+`phase/14-workflow-audit`
+(نکته: `main` هنوز فقط تا انتهای Phase 13.5.1 جلو رفته — `phase/14-workflow-audit`
+هنوز به `main` Merge نشده. این تصمیم قبلی کاربر/اکانت قبل بوده، این اکانت آن
+را تغییر نداد.)
 
 ## LAST COMMIT
-هنوز Push نشده — این تحویل به‌صورت یک ZIP دانلودی به کاربر داده شده چون
-مدل هیچ‌وقت به Token/اعتبارنامه GitHub کاربر دسترسی مستقیم نداشت.
-کاربر باید محتوای این پوشه را با یک Commit عادی (نه Force) روی `main` Push کند.
+`334a10c` — fix(phase 14.3): stop silently swallowing AuditLogs write failures
+(روی `phase/14-workflow-audit`، **هنوز به origin Push نشده**)
 
-## COMPLETED
-- بررسی کامل GitHub و Git History (شناسایی دو فایل Backup حساس)
-- Objective B: انتقال Source Code واقعی Phase 11 به ریشه Repo؛ ZIPهای قدیمی به `archive/`
-- Objective C+D: بازیابی `services/settings_service.py` و `ui/settings_window.py` از Phase 10 + رفع Regression در `ui/main_window.py` (کنترل دسترسی `is_module_allowed` دوباره وصل شد، شامل دو ماژول جدید Phase 11)
-- Objective E: تفکیک `database/schema.sql` به `database/schema/001_fresh_install.sql` (مخرب، فقط نصب تازه) و `database/migrations/001-007` (امن، غیرمخرب)
-- Objective F: تمام ۱۱ فایل مستندات ساخته شد
-- Objective G+H: زیرساخت پایه `Sessions`/`Drafts` (جدول + Service) — نه یکپارچه‌سازی کامل
-- Objective I: Smoke Test پایه (`tests/test_smoke.py`) — فقط بررسی Import و Syntax، **بدون** اتصال واقعی به SQL Server (چون این محیط به دیتابیس کاربر دسترسی ندارد)
-- `.gitignore` اضافه شد
+### چرا Push نشده
+این محیط Sandbox به هیچ Token/اعتبارنامه GitHub کاربر دسترسی ندارد (دقیقاً
+همان محدودیتی که در نسخه قبلی این فایل هم ثبت شده بود). Commit به‌صورت محلی
+روی همین Checkout ساخته شده و تست شده؛ خروجی به‌صورت Patch/Diff در اختیار
+کاربر قرار گرفته تا با یک `git push` عادی (نه Force) روی
+`phase/14-workflow-audit` اعمال شود.
 
-## NOT COMPLETED
-- پاکسازی کامل Git History از فایل‌های Backup حساس (نیاز به تأیید صریح کاربر برای Force Push؛ کاربر فعلاً «رد کن، ادامه بده» را انتخاب کرد)
-- اتصال AutoSave/Draft Recovery به فرم‌های واقعی (فقط API پایه آماده است)
-- Crash Detection در `main.py` (هنوز `start_session`/`heartbeat`/`close_session_cleanly` جایی فراخوانی نمی‌شوند)
-- ساخت Branch `phase/12-stabilization`
-- تست واقعی روی SQL Server واقعی (این محیط sandbox به SQL Server کاربر متصل نیست)
+## COMPLETED (این اکانت)
+- Audit کامل Repository: `git status`, `git log`, ساختار پروژه، خواندن
+  `PHASE_REGISTRY.md` / `PROJECT_STATE.md` / کد واقعی `services/audit_service.py`,
+  `services/settings_service.py`, `ui/main_window.py`, `ui/audit_viewer_window.py`.
+- تأیید Baseline: در لحظه شروع، `main` clean بود و `phase/14-workflow-audit`
+  دقیقاً روی `66b5632` (طبق ادعای Handoff) — تطابق کامل.
+- نصب وابستگی‌های محیط تست (`pyodbc`, `unixodbc`, `jdatetime`) — فقط برای
+  اجرای تست در همین Sandbox، هیچ تغییری در `requirements.txt` نبود چون از
+  قبل درست بود.
+- شناسایی و رفع Bug واقعی: بلعیدن بی‌صدای خطای نوشتن `AuditLogs` در
+  `create_audit_entry()` — جزئیات کامل در `PHASE_REGISTRY.md § Phase 14.3`.
+- ۵ تست جدید برای `audit_service` + گسترش `FakeDatabase`.
+- به‌روزرسانی `PHASE_REGISTRY.md`, `AI_HANDOFF.md` (همین فایل).
 
-## FILES CHANGED
-**ایجادشده:**
-`.gitignore`, `PROJECT_STATE.md`, `PHASE_REGISTRY.md`, `AI_HANDOFF.md`, `ARCHITECTURE.md`,
-`DATABASE_SCHEMA.md`, `ACCOUNTING_RULES.md`, `SECURITY.md`, `BACKUP_POLICY.md`,
-`UI_DESIGN_SYSTEM.md`, `CHANGELOG.md`, `POWER_FAILURE_RECOVERY.md`,
-`database/README.md`, `database/schema/001_fresh_install.sql`,
-`database/migrations/001_initial_safe.sql`, `database/migrations/007_session_recovery.sql`,
-`services/session_service.py`, `services/draft_service.py`, `tests/test_smoke.py`
+## NOT COMPLETED / تصمیم آگاهانه برای واگذاری به فاز بعد
+- `phase/14-workflow-audit` هنوز به `main` Merge نشده.
+- Workflow یکپارچه (Correlation ID سرتاسری بین خرید→انبار→فروش→مالی) طبق
+  `PROJECT_STATE.md` هنوز Partial است — این خودِ Phase 14 آن را حل نکرد
+  (Phase 14 فقط روی Audit/Permission تمرکز داشت)، و طبق اولویت پروژه
+  («Workflow» رتبه ۴ از ۵) بعد از تثبیت لایه حسابداری باید انجام شود.
+- **Accounting Engine دوطرفه واقعی هنوز پیاده‌سازی نشده** — این طبق
+  `PHASE_REGISTRY.md` عمداً همیشه خارج از Scope فازهای قبلی نگه داشته شده،
+  چون طبق اولویت اول پروژه («پایداری و صحت حسابداری») باید یک Phase
+  مستقل و کاملاً متمرکز باشد، نه یک زیرکار داخل فاز دیگر.
+- پاکسازی کامل Git History از فایل‌های Backup حساس هنوز انجام نشده (نیاز
+  به تصمیم صریح کاربر برای Force Push دارد؛ از Phase 12 به تعویق افتاده).
+- `AuditViewerWindow` فاقد چک Permission داخلی است (فقط به Gate شدن در
+  `MainWindow` تکیه دارد) — عمداً در این Phase تغییر داده نشد چون با الگوی
+  فعلی کل پروژه یکسان است، نه یک Regression مختص Phase 14.
 
+## FILES CHANGED (این اکانت)
 **تغییریافته:**
-`ui/main_window.py` (بازیابی importها، ساختار سه‌تایی modules، فیلتر دسترسی، متد `open_settings`)
+`services/audit_service.py`, `tests/_fake_database.py`, `PHASE_REGISTRY.md`, `AI_HANDOFF.md`
 
-**بازیابی‌شده از Phase 10 (بدون تغییر محتوا):**
-`services/settings_service.py`, `ui/settings_window.py`
-
-**جابه‌جاشده:**
-`StoreApp_Phase*.zip` و `TECHNOKALARoboAccBackUp*.zip` (باقی‌مانده) → `archive/`
-`database/phase2_purchase_inventory.sql` → `database/migrations/002_purchase_inventory.sql` (و مشابه برای 3، 4، 6، 10)
+**ایجادشده:**
+`tests/test_audit_service.py`
 
 ## DATABASE CHANGES
-هیچ تغییری روی دیتابیس واقعی کاربر اعمال نشد (این محیط به آن دسترسی ندارد).
-یک Migration جدید (`007_session_recovery.sql`) نوشته شده که باید توسط کاربر
-روی دیتابیس واقعی‌اش اجرا شود تا جداول `Sessions`/`Drafts` ساخته شوند.
-
-## REGRESSION FIXES
-Settings + User Permissions Phase 11 Regression — رفع شد (جزئیات در PHASE_REGISTRY.md)
+هیچ Migration جدیدی لازم نبود — Bug صرفاً در کد Python بود، نه Schema.
+جدول `AuditLogs` (از Phase 14، `database/migrations/008_audit_logs.sql`) بدون تغییر باقی ماند.
 
 ## TESTS
-`tests/test_smoke.py` نوشته و در این محیط اجرا شد — فقط Import/Syntax تمام ماژول‌های اصلی
-را چک می‌کند. **اتصال واقعی به SQL Server تست نشده** چون این محیط sandbox به دیتابیس
-کاربر دسترسی ندارد. صادقانه: `NOT FULLY TESTED` روی سناریوی واقعی قطع برق (بخش ۱۹ پرامپت).
+`python -m pytest -q tests` → **21 passed** (۱۶ قبل از این اکانت + ۵ جدید).
+`python -m py_compile services/audit_service.py tests/_fake_database.py tests/test_audit_service.py` → بدون خطا.
 
-## KNOWN ISSUES
-1. 🔴 دو فایل Backup حساس هنوز در Git History (نه در نسخه فعلی) — نیاز به تصمیم کاربر درباره Force Push
-2. Power Failure Protection فقط Foundation است، هنوز به UI وصل نشده
-3. هیچ Branch جداگانه‌ای برای این فاز ساخته نشد
+## KNOWN ISSUES (باقی‌مانده، اولویت‌بندی‌شده طبق اولویت پروژه)
+1. 🟡 Accounting Engine دوطرفه واقعی وجود ندارد — طبق اولویت اول پروژه، این
+   باید موضوع اصلی یکی از فازهای بعدی مستقل باشد.
+2. 🟡 `phase/14-workflow-audit` هنوز Merge نشده به `main`.
+3. 🟡 Workflow Correlation سرتاسری بین ماژول‌ها (خرید/فروش/انبار/مالی) کامل نیست.
+4. 🔴 دو فایل Backup حساس هنوز در Git History (نه در نسخه فعلی) — از Phase 12.
 
-## NEXT PHASE
-13 — پیشنهاد: اتصال AutoSave/Recovery به فرم خرید (اولین فرم پایلوت) + شروع لایه حسابداری دوطرفه
+## NEXT PHASE — پیشنهاد برای اکانت بعدی
+15 — پیشنهاد مشخص طبق اولویت پروژه (حسابداری > امنیت > Database > Workflow > UX):
+   الف) ابتدا `phase/14-workflow-audit` (شامل همین Commit Phase 14.3) را پس از
+        بازبینی نهایی کاربر به `main` Merge کن.
+   ب) سپس شروع Phase حسابداری دوطرفه: طراحی جدول `LedgerEntries`/`ChartOfAccounts`
+      و اتصال آن به تراکنش‌های موجود (فروش، خرید، دریافت، پرداخت، چک) — این
+      باید یک Phase مستقل با تست‌های اختصاصی باشد، نه یک تغییر جانبی.
+   این پیشنهاد نهایی نیست؛ اکانت بعدی باید ابتدا خودش `git log` و وضعیت
+   واقعی `main` در آن لحظه را بررسی کند، نه فقط به این فایل اعتماد کند.
