@@ -18,6 +18,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db import Database
 from utils.security import hash_password
+from services.audit_service import create_audit_entry
 
 
 # =========================================================
@@ -111,6 +112,15 @@ def create_user(username: str, full_name: str, password: str, is_admin: bool) ->
         (username, hashed, salt, full_name, 1 if is_admin else 0)
     )
     db.close()
+
+    create_audit_entry(
+        None,
+        "Create",
+        "Users",
+        new_id,
+        f"Created user: {username}"
+    )
+
     return new_id
 
 
