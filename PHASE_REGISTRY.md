@@ -41,3 +41,16 @@
 **یادداشت:**
 - فایل `services/backup/legacy_backup_service.py` بررسی شد.
 - هیچ import فعالی از آن پیدا نشد؛ فعلاً حذف نشده و به‌عنوان کد قدیمی باقی می‌ماند.
+
+## Verification Update — Session Recovery Review
+
+Verified:
+- Crash Detection is wired in `main.py`
+  - `find_crashed_sessions()`
+  - `mark_as_crashed()`
+
+- Session propagation verified:
+  - `MainWindow` passes `session_id` to Purchase and Sales windows.
+  - `SalesInvoicesWindow` receives and keeps `session_id`.
+
+Previous concerns about missing wiring are resolved.
