@@ -10,6 +10,7 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db import Database
+from services.audit_service import create_audit_entry
 
 
 class SalesError(Exception):
@@ -229,6 +230,7 @@ def create_sales_invoice(customer_id: int, shamsi_date: str, discount_amount: fl
             )
 
         conn.commit()
+        create_audit_entry(user_id, "Create", "SalesInvoices", invoice_id, f"Sales invoice {invoice_number}")
         return invoice_id, invoice_number
 
     except Exception:
