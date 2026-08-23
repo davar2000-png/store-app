@@ -40,6 +40,7 @@ MODULE_PERMISSIONS = [
     ("ModuleImport",        "📥 Import از ربات"),
     ("ModuleBackup",        "🗄️ پشتیبان‌گیری"),
     ("ModuleAssistant",     "🤖 دستیار هوش مصنوعی"),
+    ("audit.view",          "📜 مشاهده گزارش رویدادها (Audit)"),
 ]
 
 
