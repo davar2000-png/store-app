@@ -136,7 +136,7 @@ def update_user(user_id: int, full_name: str, is_admin: bool, is_active: bool, a
 
 
     create_audit_entry(actor_user_id, "Update", "Users", user_id, f"Updated user: {full_name}")
-def reset_user_password(user_id: int, new_password: str):
+def reset_user_password(user_id: int, new_password: str, actor_user_id: int = None):
     hashed, salt = hash_password(new_password)
     db = Database()
     db.execute(
@@ -144,6 +144,7 @@ def reset_user_password(user_id: int, new_password: str):
         (hashed, salt, user_id)
     )
     db.close()
+    create_audit_entry(actor_user_id, "Update", "Users", user_id, "User password changed")
 
 
 # =========================================================

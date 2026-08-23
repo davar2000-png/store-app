@@ -159,7 +159,7 @@ class UserDialog(QDialog):
                     actor_user_id=self.current_user_id
                 )
                 if password:
-                    ss.reset_user_password(self.user["ID"], password)
+                    ss.reset_user_password(self.user["ID"], password, actor_user_id=self.current_user_id)
             else:
                 if not password:
                     QMessageBox.warning(self, "خطا", "برای کاربر جدید، رمز عبور الزامی است.")
