@@ -10,6 +10,7 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db import Database
+from services.audit_service import create_audit_entry
 
 
 class InventoryError(Exception):
@@ -220,6 +221,7 @@ def create_purchase_invoice(supplier_id: int, shamsi_date: str, discount_amount:
             )
 
         conn.commit()
+        create_audit_entry(user_id, "Create", "PurchaseInvoices", invoice_id, f"Purchase invoice {invoice_number}")
         return invoice_id, invoice_number
 
     except Exception:
@@ -416,6 +418,7 @@ def create_purchase_return_invoice(original_invoice_id: int, shamsi_date: str,
             )
 
         conn.commit()
+        create_audit_entry(user_id, "Create", "PurchaseInvoices", invoice_id, f"Purchase invoice {invoice_number}")
         return return_invoice_id, invoice_number
 
     except Exception:
