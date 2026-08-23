@@ -28,7 +28,11 @@ import copy
 import pytest
 
 import services.financial_service as financial_service
-from services.financial_service import FinancialError, _build_receipt_journal_lines
+from services.financial_service import (
+    FinancialError,
+    _build_receipt_journal_lines,
+    _build_payment_journal_lines,
+)
 from services.accounting_service import AccountingError
 
 
@@ -155,6 +159,46 @@ class _FakeCursor:
             state["sales_invoices"][invoice_id]["PaidAmount"] += amount
             return
 
+        if normalized.startswith("SELECT ISNULL(MAX(PAYMENTNUMBER), 5000)"):
+            next_num = max((p["PaymentNumber"] for p in state["payments"]), default=5000) + 1
+            self._last_result = (next_num,)
+            return
+
+        if normalized.startswith("INSERT INTO PAYMENTS "):
+            payment_number, person_ref, shamsi_date, total_amount, description, user_ref = params
+            new_id = state["_next_payment_id"]
+            state["_next_payment_id"] += 1
+            state["payments"].append({
+                "ID": new_id, "PaymentNumber": payment_number, "PersonRef": person_ref,
+                "ShamsiDate": shamsi_date, "TotalAmount": total_amount,
+                "Description": description, "UserRef": user_ref,
+            })
+            state["_last_identity"] = new_id
+            self._last_result = None
+            return
+
+        if normalized.startswith("INSERT INTO PAYMENTLINES"):
+            payment_ref, method_type, cash_box_ref, bank_account_ref, cheque_ref, amount = params
+            state["payment_lines"].append({
+                "PaymentRef": payment_ref, "MethodType": method_type, "CashBoxRef": cash_box_ref,
+                "BankAccountRef": bank_account_ref, "ChequeRef": cheque_ref, "Amount": amount,
+            })
+            self._last_result = None
+            return
+
+        if normalized.startswith("INSERT INTO PAYMENTALLOCATIONS"):
+            payment_ref, invoice_ref, amount = params
+            state["payment_allocations"].append({
+                "PaymentRef": payment_ref, "PurchaseInvoiceRef": invoice_ref, "Amount": amount,
+            })
+            self._last_result = None
+            return
+
+        if normalized.startswith("UPDATE PURCHASEINVOICES SET PAIDAMOUNT = PAIDAMOUNT + ? WHERE ID = ?"):
+            amount, invoice_id = params
+            state["purchase_invoices"][invoice_id]["PaidAmount"] += amount
+            return
+
         # --- هسته accounting_service._post_journal_entry_on_cursor ---
         if normalized.startswith("SELECT ISNULL(MAX(ENTRYNUMBER)"):
             next_num = max((e["EntryNumber"] for e in state["journal_entries"]), default=0) + 1
@@ -269,6 +313,10 @@ class _FakeDatabase:
             "receipt_lines": [],
             "receipt_allocations": [],
             "sales_invoices": {},
+            "payments": [],
+            "payment_lines": [],
+            "payment_allocations": [],
+            "purchase_invoices": {},
             "cash_box_transactions": [],
             "bank_transactions": [],
             "accounts": [
@@ -276,11 +324,15 @@ class _FakeDatabase:
                 {"ID": 2, "Code": "1100", "Name": "دریافتنی", "IsActive": True},
                 {"ID": 3, "Code": "1300", "Name": "اسناد دریافتنی", "IsActive": True},
                 {"ID": 4, "Code": "2300", "Name": "پیش‌دریافت مشتری", "IsActive": True},
+                {"ID": 5, "Code": "2000", "Name": "حساب‌های پرداختنی", "IsActive": True},
+                {"ID": 6, "Code": "2100", "Name": "اسناد پرداختنی", "IsActive": True},
+                {"ID": 7, "Code": "1500", "Name": "پیش‌پرداخت به تأمین‌کنندگان", "IsActive": True},
             ],
             "journal_entries": [],
             "journal_lines": [],
             "_next_receipt_id": 1,
             "_next_cheque_id": 1,
+            "_next_payment_id": 1,
             "_next_journal_id": 1,
             "_last_identity": None,
         }
@@ -300,6 +352,7 @@ def setup_function():
     state["cash_boxes"][1] = {"ID": 1, "CurrentBalance": 1000.0}
     state["bank_accounts"][1] = {"ID": 1, "CurrentBalance": 5000.0}
     state["sales_invoices"][1] = {"ID": 1, "PaidAmount": 0.0}
+    state["purchase_invoices"][1] = {"ID": 1, "PaidAmount": 0.0}
 
 
 def _cheque_line(amount=100.0, **extra):
@@ -762,3 +815,457 @@ def test_build_receipt_journal_lines_never_credits_full_amount_to_1100_when_part
     ar_line = next(l for l in lines if l["account_code"] == "1100")
     assert ar_line["credit"] != 1000.0
     assert ar_line["credit"] == 400.0
+
+
+# =========================================================
+# Phase 15.5 — بخش ۴: Regression: رفتار فعلی create_payment()
+# (نباید با اتصال Ledger بشکند)
+# =========================================================
+
+def test_create_payment_rejects_empty_lines():
+    with pytest.raises(FinancialError):
+        financial_service.create_payment(1, "1404-06-01", "", 1, [], [])
+
+
+def test_create_payment_rejects_zero_total():
+    with pytest.raises(FinancialError):
+        financial_service.create_payment(
+            1, "1404-06-01", "", 1,
+            [{"method": "Cash", "amount": 0, "cash_box_id": 1}], []
+        )
+
+
+def test_create_payment_rejects_over_allocation():
+    with pytest.raises(FinancialError):
+        financial_service.create_payment(
+            1, "1404-06-01", "", 1,
+            [{"method": "Cash", "amount": 100, "cash_box_id": 1}],
+            [{"invoice_id": 1, "amount": 1000}],
+        )
+    state = _FakeDatabase._shared_state
+    assert state["payments"] == []
+
+
+def test_create_payment_rejects_invalid_payment_method():
+    with pytest.raises(FinancialError):
+        financial_service.create_payment(
+            1, "1404-06-01", "", 1,
+            [{"method": "Crypto", "amount": 100}], []
+        )
+
+
+def test_create_payment_rejects_zero_or_negative_line_amount():
+    with pytest.raises(FinancialError):
+        financial_service.create_payment(
+            1, "1404-06-01", "", 1,
+            [{"method": "Cash", "amount": 100, "cash_box_id": 1},
+             {"method": "Bank", "amount": -1, "bank_account_id": 1}],
+            [],
+        )
+
+
+def test_create_payment_cash_updates_cash_box_balance():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Cash", "amount": 300.0, "cash_box_id": 1}], []
+    )
+    state = _FakeDatabase._shared_state
+    assert state["cash_boxes"][1]["CurrentBalance"] == 700.0
+
+
+def test_create_payment_cash_inserts_cash_box_transaction():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Cash", "amount": 300.0, "cash_box_id": 1}], []
+    )
+    state = _FakeDatabase._shared_state
+    assert len(state["cash_box_transactions"]) == 1
+    assert state["cash_box_transactions"][0]["Amount"] == 300.0
+
+
+def test_create_payment_bank_updates_bank_account_balance():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Bank", "amount": 700.0, "bank_account_id": 1}], []
+    )
+    state = _FakeDatabase._shared_state
+    assert state["bank_accounts"][1]["CurrentBalance"] == 4300.0
+
+
+def test_create_payment_bank_inserts_bank_transaction():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Bank", "amount": 700.0, "bank_account_id": 1}], []
+    )
+    state = _FakeDatabase._shared_state
+    assert len(state["bank_transactions"]) == 1
+    assert state["bank_transactions"][0]["Amount"] == 700.0
+
+
+def test_create_payment_cheque_creates_cheques_row():
+    financial_service.create_payment(1, "1404-06-01", "", 1, [_cheque_line(250.0)], [])
+    state = _FakeDatabase._shared_state
+    assert len(state["cheques"]) == 1
+    assert state["cheques"][0]["Amount"] == 250.0
+    assert state["cheques"][0]["ChequeType"] == "Issued"
+
+
+def test_create_payment_cheque_remains_in_hand():
+    financial_service.create_payment(1, "1404-06-01", "", 1, [_cheque_line(250.0)], [])
+    state = _FakeDatabase._shared_state
+    assert state["cheques"][0]["Status"] == "InHand"
+
+
+def test_create_payment_cheque_does_not_touch_cash_or_bank():
+    financial_service.create_payment(1, "1404-06-01", "", 1, [_cheque_line(250.0)], [])
+    state = _FakeDatabase._shared_state
+    assert state["cash_boxes"][1]["CurrentBalance"] == 1000.0
+    assert state["bank_accounts"][1]["CurrentBalance"] == 5000.0
+    assert state["cash_box_transactions"] == []
+    assert state["bank_transactions"] == []
+
+
+def test_create_payment_mixed_cash_bank_cheque():
+    payment_id, _ = financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [
+            {"method": "Cash", "amount": 100.0, "cash_box_id": 1},
+            {"method": "Bank", "amount": 200.0, "bank_account_id": 1},
+            _cheque_line(300.0),
+        ],
+        [],
+    )
+    state = _FakeDatabase._shared_state
+    assert len(state["payment_lines"]) == 3
+    assert state["cash_boxes"][1]["CurrentBalance"] == 900.0
+    assert state["bank_accounts"][1]["CurrentBalance"] == 4800.0
+    assert len(state["cheques"]) == 1
+
+
+def test_create_payment_inserts_allocations_and_updates_paid_amount():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Cash", "amount": 500.0, "cash_box_id": 1}],
+        [{"invoice_id": 1, "amount": 500.0}],
+    )
+    state = _FakeDatabase._shared_state
+    assert len(state["payment_allocations"]) == 1
+    assert state["purchase_invoices"][1]["PaidAmount"] == 500.0
+
+
+def test_create_payment_partial_allocation_remains_allowed():
+    payment_id, _ = financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Cash", "amount": 1000.0, "cash_box_id": 1}],
+        [{"invoice_id": 1, "amount": 400.0}],
+    )
+    state = _FakeDatabase._shared_state
+    assert payment_id is not None
+    assert state["purchase_invoices"][1]["PaidAmount"] == 400.0
+    assert state["payments"][0]["TotalAmount"] == 1000.0
+
+
+def test_create_payment_rolls_back_everything_on_failure():
+    state = _FakeDatabase._shared_state
+    with pytest.raises(FinancialError):
+        financial_service.create_payment(
+            1, "1404-06-01", "", 1,
+            [{"method": "Cash", "amount": 100.0, "cash_box_id": 1},
+             {"method": "Bank", "amount": 0, "bank_account_id": 1}],
+            [],
+        )
+    assert state["payments"] == []
+    assert state["cash_boxes"][1]["CurrentBalance"] == 1000.0
+    assert state["cash_box_transactions"] == []
+
+
+# =========================================================
+# Phase 15.5 — بخش ۵: اتصال Ledger: سند حسابداری دوطرفه پرداخت
+# =========================================================
+
+def test_create_payment_fully_allocated_cash_journal():
+    payment_id, _ = financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Cash", "amount": 500.0, "cash_box_id": 1}],
+        [{"invoice_id": 1, "amount": 500.0}],
+    )
+    state = _FakeDatabase._shared_state
+    accounts_by_id = {a["ID"]: a["Code"] for a in state["accounts"]}
+    lines = state["journal_lines"]
+
+    debit_payable = next(l["Debit"] for l in lines if accounts_by_id[l["AccountRef"]] == "2000")
+    credit_cash = next(l["Credit"] for l in lines if accounts_by_id[l["AccountRef"]] == "1000")
+
+    assert debit_payable == 500.0
+    assert credit_cash == 500.0
+    assert all(accounts_by_id[l["AccountRef"]] != "1500" for l in lines)
+
+
+def test_create_payment_fully_allocated_bank_journal():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Bank", "amount": 700.0, "bank_account_id": 1}],
+        [{"invoice_id": 1, "amount": 700.0}],
+    )
+    state = _FakeDatabase._shared_state
+    accounts_by_id = {a["ID"]: a["Code"] for a in state["accounts"]}
+    lines = state["journal_lines"]
+
+    debit_payable = next(l["Debit"] for l in lines if accounts_by_id[l["AccountRef"]] == "2000")
+    credit_cash = next(l["Credit"] for l in lines if accounts_by_id[l["AccountRef"]] == "1000")
+
+    assert debit_payable == 700.0
+    assert credit_cash == 700.0
+
+
+def test_create_payment_fully_allocated_cheque_journal():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [_cheque_line(250.0)],
+        [{"invoice_id": 1, "amount": 250.0}],
+    )
+    state = _FakeDatabase._shared_state
+    accounts_by_id = {a["ID"]: a["Code"] for a in state["accounts"]}
+    lines = state["journal_lines"]
+
+    debit_payable = next(l["Debit"] for l in lines if accounts_by_id[l["AccountRef"]] == "2000")
+    credit_notes = next(l["Credit"] for l in lines if accounts_by_id[l["AccountRef"]] == "2100")
+
+    assert debit_payable == 250.0
+    assert credit_notes == 250.0
+    assert all(accounts_by_id[l["AccountRef"]] != "1000" for l in lines)
+
+
+def test_create_payment_mixed_journal_credits_1000_and_2100():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [
+            {"method": "Cash", "amount": 100.0, "cash_box_id": 1},
+            {"method": "Bank", "amount": 200.0, "bank_account_id": 1},
+            _cheque_line(300.0),
+        ],
+        [{"invoice_id": 1, "amount": 600.0}],
+    )
+    state = _FakeDatabase._shared_state
+    accounts_by_id = {a["ID"]: a["Code"] for a in state["accounts"]}
+    lines = state["journal_lines"]
+
+    credit_cash_bank = next(l["Credit"] for l in lines if accounts_by_id[l["AccountRef"]] == "1000")
+    credit_notes = next(l["Credit"] for l in lines if accounts_by_id[l["AccountRef"]] == "2100")
+    debit_payable = next(l["Debit"] for l in lines if accounts_by_id[l["AccountRef"]] == "2000")
+
+    assert credit_cash_bank == 300.0  # 100 + 200
+    assert credit_notes == 300.0
+    assert debit_payable == 600.0
+    assert sum(l["Debit"] for l in lines) == sum(l["Credit"] for l in lines)
+
+
+def test_create_payment_partially_allocated_debits_1500_for_remainder():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Cash", "amount": 1000.0, "cash_box_id": 1}],
+        [{"invoice_id": 1, "amount": 400.0}],
+    )
+    state = _FakeDatabase._shared_state
+    accounts_by_id = {a["ID"]: a["Code"] for a in state["accounts"]}
+    lines = state["journal_lines"]
+
+    credit_cash = next(l["Credit"] for l in lines if accounts_by_id[l["AccountRef"]] == "1000")
+    debit_payable = next(l["Debit"] for l in lines if accounts_by_id[l["AccountRef"]] == "2000")
+    debit_advance = next(l["Debit"] for l in lines if accounts_by_id[l["AccountRef"]] == "1500")
+
+    assert credit_cash == 1000.0
+    assert debit_payable == 400.0
+    assert debit_advance == 600.0
+    assert sum(l["Debit"] for l in lines) == sum(l["Credit"] for l in lines)
+
+
+def test_create_payment_fully_unallocated_debits_only_1500():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Cash", "amount": 500.0, "cash_box_id": 1}],
+        [],
+    )
+    state = _FakeDatabase._shared_state
+    accounts_by_id = {a["ID"]: a["Code"] for a in state["accounts"]}
+    lines = state["journal_lines"]
+
+    assert all(accounts_by_id[l["AccountRef"]] != "2000" for l in lines)
+    debit_advance = next(l["Debit"] for l in lines if accounts_by_id[l["AccountRef"]] == "1500")
+    assert debit_advance == 500.0
+
+
+def test_create_payment_journal_always_balanced():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [
+            {"method": "Cash", "amount": 150.0, "cash_box_id": 1},
+            {"method": "Bank", "amount": 350.0, "bank_account_id": 1},
+            _cheque_line(500.0),
+        ],
+        [{"invoice_id": 1, "amount": 600.0}],
+    )
+    state = _FakeDatabase._shared_state
+    lines = state["journal_lines"]
+    assert sum(l["Debit"] for l in lines) == sum(l["Credit"] for l in lines)
+
+
+def test_create_payment_journal_source_table_and_id():
+    payment_id, _ = financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Cash", "amount": 500.0, "cash_box_id": 1}],
+        [{"invoice_id": 1, "amount": 500.0}],
+    )
+    state = _FakeDatabase._shared_state
+    entry = state["journal_entries"][0]
+    assert entry["SourceTable"] == "Payments"
+    assert entry["SourceID"] == payment_id
+
+
+def test_create_payment_journal_entry_number_increments():
+    financial_service.create_payment(
+        1, "1404-06-01", "", 1,
+        [{"method": "Cash", "amount": 100.0, "cash_box_id": 1}], []
+    )
+    financial_service.create_payment(
+        1, "1404-06-02", "", 1,
+        [{"method": "Cash", "amount": 200.0, "cash_box_id": 1}], []
+    )
+    state = _FakeDatabase._shared_state
+    numbers = sorted(e["EntryNumber"] for e in state["journal_entries"])
+    assert numbers == [1, 2]
+
+
+def test_create_payment_missing_account_2000_rolls_back_everything():
+    state = _FakeDatabase._shared_state
+    state["accounts"] = [a for a in state["accounts"] if a["Code"] != "2000"]
+
+    with pytest.raises(AccountingError):
+        financial_service.create_payment(
+            1, "1404-06-01", "", 1,
+            [{"method": "Cash", "amount": 500.0, "cash_box_id": 1}],
+            [{"invoice_id": 1, "amount": 500.0}],
+        )
+
+    assert state["payments"] == []
+    assert state["journal_entries"] == []
+    assert state["journal_lines"] == []
+    assert state["cash_boxes"][1]["CurrentBalance"] == 1000.0  # Rollback شده
+
+
+def test_create_payment_missing_account_1000_rolls_back_everything():
+    state = _FakeDatabase._shared_state
+    state["accounts"] = [a for a in state["accounts"] if a["Code"] != "1000"]
+
+    with pytest.raises(AccountingError):
+        financial_service.create_payment(
+            1, "1404-06-01", "", 1,
+            [{"method": "Cash", "amount": 500.0, "cash_box_id": 1}],
+            [{"invoice_id": 1, "amount": 500.0}],
+        )
+
+    assert state["payments"] == []
+    assert state["purchase_invoices"][1]["PaidAmount"] == 0.0  # Rollback شده
+
+
+def test_create_payment_missing_account_2100_rolls_back_everything():
+    state = _FakeDatabase._shared_state
+    state["accounts"] = [a for a in state["accounts"] if a["Code"] != "2100"]
+
+    with pytest.raises(AccountingError):
+        financial_service.create_payment(
+            1, "1404-06-01", "", 1,
+            [_cheque_line(250.0)],
+            [{"invoice_id": 1, "amount": 250.0}],
+        )
+
+    assert state["payments"] == []
+    assert state["cheques"] == []  # Rollback شده
+
+
+def test_create_payment_missing_account_1500_rolls_back_everything():
+    state = _FakeDatabase._shared_state
+    state["accounts"] = [a for a in state["accounts"] if a["Code"] != "1500"]
+
+    with pytest.raises(AccountingError):
+        financial_service.create_payment(
+            1, "1404-06-01", "", 1,
+            [{"method": "Cash", "amount": 1000.0, "cash_box_id": 1}],
+            [{"invoice_id": 1, "amount": 400.0}],  # partial -> نیاز به 1500
+        )
+
+    assert state["payments"] == []
+    assert state["cash_boxes"][1]["CurrentBalance"] == 1000.0  # Rollback شده
+
+
+def test_create_payment_pure_validation_failure_never_touches_ledger():
+    state = _FakeDatabase._shared_state
+    with pytest.raises(FinancialError):
+        financial_service.create_payment(1, "1404-06-01", "", 1, [], [])
+    assert state["journal_entries"] == []
+    assert state["journal_lines"] == []
+
+
+# =========================================================
+# Phase 15.5 — بخش ۶: _build_payment_journal_lines: تست خالص (بدون دیتابیس)
+# =========================================================
+
+def test_build_payment_journal_lines_fully_allocated_balanced_pure():
+    lines = _build_payment_journal_lines(
+        cash_amount=500.0, bank_amount=0, cheque_amount=0, alloc_sum=500.0, total_amount=500.0
+    )
+    assert sum(l.get("debit", 0) for l in lines) == sum(l.get("credit", 0) for l in lines)
+    codes = {l["account_code"] for l in lines}
+    assert codes == {"2000", "1000"}
+
+
+def test_build_payment_journal_lines_omits_1500_when_fully_allocated():
+    lines = _build_payment_journal_lines(
+        cash_amount=500.0, bank_amount=0, cheque_amount=0, alloc_sum=500.0, total_amount=500.0
+    )
+    assert all(l["account_code"] != "1500" for l in lines)
+
+
+def test_build_payment_journal_lines_includes_1500_when_partially_allocated():
+    lines = _build_payment_journal_lines(
+        cash_amount=1000.0, bank_amount=0, cheque_amount=0, alloc_sum=400.0, total_amount=1000.0
+    )
+    advance_line = next(l for l in lines if l["account_code"] == "1500")
+    payable_line = next(l for l in lines if l["account_code"] == "2000")
+    assert advance_line["debit"] == 600.0
+    assert payable_line["debit"] == 400.0
+    assert sum(l.get("debit", 0) for l in lines) == sum(l.get("credit", 0) for l in lines)
+
+
+def test_build_payment_journal_lines_omits_2000_when_fully_unallocated():
+    lines = _build_payment_journal_lines(
+        cash_amount=500.0, bank_amount=0, cheque_amount=0, alloc_sum=0, total_amount=500.0
+    )
+    codes = {l["account_code"] for l in lines}
+    assert "2000" not in codes
+    assert codes == {"1500", "1000"}
+
+
+def test_build_payment_journal_lines_aggregates_cash_and_bank_into_1000():
+    lines = _build_payment_journal_lines(
+        cash_amount=100.0, bank_amount=200.0, cheque_amount=0, alloc_sum=300.0, total_amount=300.0
+    )
+    cash_bank_line = next(l for l in lines if l["account_code"] == "1000")
+    assert cash_bank_line["credit"] == 300.0
+
+
+def test_build_payment_journal_lines_cheque_goes_to_2100_not_1000():
+    lines = _build_payment_journal_lines(
+        cash_amount=0, bank_amount=0, cheque_amount=250.0, alloc_sum=250.0, total_amount=250.0
+    )
+    codes = {l["account_code"] for l in lines}
+    assert "2100" in codes and "1000" not in codes
+
+
+def test_build_payment_journal_lines_never_debits_full_amount_to_2000_when_partial():
+    lines = _build_payment_journal_lines(
+        cash_amount=1000.0, bank_amount=0, cheque_amount=0, alloc_sum=400.0, total_amount=1000.0
+    )
+    payable_line = next(l for l in lines if l["account_code"] == "2000")
+    assert payable_line["debit"] != 1000.0
+    assert payable_line["debit"] == 400.0
