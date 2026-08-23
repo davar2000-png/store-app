@@ -113,7 +113,7 @@ class SettingsTab(QWidget):
 
     def on_toggle(self):
         enabled = self.enable_check.isChecked()
-        asst.set_assistant_enabled(enabled)
+        asst.set_assistant_enabled(enabled, self.current_user["ID"])
         self.update_status(enabled)
 
     def update_status(self, enabled):

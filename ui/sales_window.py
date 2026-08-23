@@ -323,7 +323,7 @@ class NewSalesInvoiceDialog(QDialog):
             return
 
         try:
-            draft_service.discard_draft(self.draft_id)
+            draft_service.discard_draft(self.draft_id, self.current_user["ID"])
         except Exception:
             logger.exception("خطا در دور ریختن پیش‌نویس فاکتور فروش")
 
@@ -355,7 +355,7 @@ class NewSalesInvoiceDialog(QDialog):
             )
             if self.draft_id:
                 try:
-                    draft_service.complete_draft(self.draft_id)
+                    draft_service.complete_draft(self.draft_id, self.current_user["ID"])
                 except Exception:
                     logger.exception(
                         "خطا در نهایی‌کردن Draft بعد از ثبت فاکتور فروش"

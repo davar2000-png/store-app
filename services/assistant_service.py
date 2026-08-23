@@ -29,7 +29,7 @@ def is_assistant_enabled() -> bool:
     return row is not None and row["SettingValue"] == "1"
 
 
-def set_assistant_enabled(enabled: bool):
+def set_assistant_enabled(enabled: bool, user_id: int = None):
     db = Database()
     existing = db.fetch_one("SELECT ID FROM Settings WHERE SettingKey = 'AiAssistantEnabled'")
     value = "1" if enabled else "0"
@@ -45,7 +45,7 @@ def set_assistant_enabled(enabled: bool):
         action = "Create"
     db.close()
 
-    create_audit_entry(None, action, "Settings", record_id, f"AiAssistantEnabled changed to {value}")
+    create_audit_entry(user_id, action, "Settings", record_id, f"AiAssistantEnabled changed to {value}")
 
 
 def fmt(n):
