@@ -9,6 +9,7 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db import Database
+from services.audit_service import create_audit_entry
 from utils.persian_date import add_months_shamsi
 
 
@@ -131,6 +132,7 @@ def manual_cash_box_transaction(cash_box_id: int, tx_type: str, amount: float,
             (cash_box_id, tx_type, amount, new_balance, shamsi_date, description or "", user_id)
         )
         conn.commit()
+        create_audit_entry(user_id, "Create", "Receipts", receipt_id, f"Receipt {receipt_number}")
     except Exception:
         conn.rollback()
         raise
@@ -164,6 +166,7 @@ def manual_bank_transaction(bank_account_id: int, tx_type: str, amount: float,
             (bank_account_id, tx_type, amount, new_balance, shamsi_date, description or "", user_id)
         )
         conn.commit()
+        create_audit_entry(user_id, "Create", "Receipts", receipt_id, f"Receipt {receipt_number}")
     except Exception:
         conn.rollback()
         raise
@@ -361,6 +364,7 @@ def create_receipt(customer_id: int, shamsi_date: str, description: str, user_id
             )
 
         conn.commit()
+        create_audit_entry(user_id, "Create", "Receipts", receipt_id, f"Receipt {receipt_number}")
         return receipt_id, receipt_number
 
     except Exception:
@@ -485,6 +489,7 @@ def create_payment(supplier_id: int, shamsi_date: str, description: str, user_id
             )
 
         conn.commit()
+        create_audit_entry(user_id, "Create", "Receipts", receipt_id, f"Receipt {receipt_number}")
         return payment_id, payment_number
 
     except Exception:
@@ -586,6 +591,7 @@ def change_cheque_status(cheque_id: int, new_status: str, shamsi_date: str, user
         )
 
         conn.commit()
+        create_audit_entry(user_id, "Create", "Receipts", receipt_id, f"Receipt {receipt_number}")
     except Exception:
         conn.rollback()
         raise
@@ -665,6 +671,7 @@ def create_installment_plan(customer_id: int, sales_invoice_id: int, shamsi_date
             )
 
         conn.commit()
+        create_audit_entry(user_id, "Create", "Receipts", receipt_id, f"Receipt {receipt_number}")
         return plan_id
     except Exception:
         conn.rollback()
@@ -769,6 +776,7 @@ def mark_installment_paid(item_id: int, method: str, shamsi_date: str, user_id: 
         )
 
         conn.commit()
+        create_audit_entry(user_id, "Create", "Receipts", receipt_id, f"Receipt {receipt_number}")
     except Exception:
         conn.rollback()
         raise
