@@ -362,6 +362,7 @@ def create_receipt(customer_id: int, shamsi_date: str, description: str, user_id
             )
 
         conn.commit()
+        create_audit_entry(user_id, "Create", "Receipts", receipt_id, f"Receipt {receipt_number}")
         return receipt_id, receipt_number
 
     except Exception:
