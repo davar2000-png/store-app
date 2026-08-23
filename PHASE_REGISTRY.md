@@ -10,6 +10,7 @@
 | 14 | Audit Trail (Actor, Permission Changes, Password Changes, Audit Viewer, `audit.view` Permission با Fail-Closed) | Completed | Commit `66b5632` |
 | 14.3 | Audit Reliability Hardening (رفع Bug بلعیدن بی‌صدای خطای نوشتن Audit) | Completed | جزئیات پایین |
 | 15.1 | Accounting Core Foundation (Chart of Accounts + Journal Entries دوطرفه، هنوز وصل‌نشده) | Completed | جزئیات پایین |
+| 15.2 | اتصال فروش به حسابداری دوطرفه (اولین تراکنش تجاری واقعی متصل به Ledger) | Completed | جزئیات پایین |
 
 ## Phase 12 — جزئیات
 
@@ -136,6 +137,106 @@ Rollback باشد.
   `inventory_service`) به `post_journal_entry` وصل نشده.
 - هیچ رابط UI (Ledger Viewer) ساخته نشده — طبق اولویت پروژه (UI آخرین
   اولویت است) و چون هنوز هیچ سند واقعی Post نشده که چیزی برای نمایش باشد.
+
+## Phase 15.2 — اتصال فروش به حسابداری دوطرفه
+
+**Commits:** روی برنچ `phase/14-workflow-audit` (لیست کامل در `AI_HANDOFF.md`)
+
+**تحلیل وضعیت واقعی قبل از شروع (طبق دستور Brief):**
+بررسی کامل `services/sales_service.py::create_sales_invoice()` نشان داد:
+- سربرگ فاکتور + اقلام + کسر از قدیمی‌ترین لایه‌های FIFO + فروخته‌شدن
+  سریال/IMEI + بروزرسانی `Products.CurrentStock` + `ProductCardex`، همه در
+  یک Transaction اتمیک واحد (یک `Database().connect()` + یک `cursor`) روی
+  `sales_service.py` انجام می‌شود؛ `conn.commit()` فقط یک‌بار در انتها،
+  `except: conn.rollback(); raise` برای هر خطا.
+- بهای تمام‌شده هر ردیف فاکتور از قبل به‌درستی در
+  `SalesInvoiceItems.CostAmount` محاسبه و ذخیره می‌شود (خروجی همان مسیر
+  FIFO موجود؛ این فاز به آن دست نزد).
+- `services/sales_service.py` **هیچ تست**ی نداشت (صفر) — دقیقاً همان
+  چیزی که `AI_HANDOFF.md` هشدار داده بود.
+- Chart of Accounts موجود (از Phase 15.1) شامل ۱۱۰۰ (دریافتنی)، ۱۲۰۰
+  (موجودی کالا)، ۴۰۰۰ (درآمد فروش)، ۵۰۰۰ (بهای تمام‌شده) بود اما **هیچ
+  حساب بدهی برای مالیات دریافتی از مشتری نداشت**، درحالی‌که `TaxAmount`
+  یک فیلد واقعی و فعال است (`ui/sales_window.py::tax_input`).
+
+**ابهام حسابداری شناسایی‌شده (طبق قانون Brief گزارش شد، حدس زده نشد):**
+بدون یک حساب بدهی برای مالیات، سند حسابداری فروش وقتی `TaxAmount > 0`
+باشد یا موازنه نمی‌شد یا باید مالیات را حدسی به یک حساب نامرتبط (مثلاً
+خود درآمد فروش) بستانکار می‌کرد که هر دو رفتار نادرست حسابداری است.
+**تصمیم:** حداقل تغییر لازم اضافه شد — نه بازطراحی Chart of Accounts:
+`database/migrations/010_accounting_tax_payable.sql` فقط یک حساب جدید
+(`2200` — مالیات دریافتنی از مشتری / پرداختنی به سازمان مالیاتی، نوع
+Liability) به‌همان روش Idempotent بقیه Seedها اضافه می‌کند.
+
+**طراحی سند حسابداری فروش (`services/sales_service.py::_build_sales_journal_lines`):**
+یک سند ترکیبی (Compound Journal Entry) به‌ازای هر فاکتور فروش:
+```
+بدهکار   1100 حساب‌های دریافتنی   = PayableAmount
+بستانکار 4000 درآمد فروش          = TotalAmount − DiscountAmount
+بستانکار 2200 مالیات دریافتنی     = TaxAmount   (فقط اگر > 0)
+---
+بدهکار   5000 بهای تمام‌شده کالای فروش‌رفته = SUM(CostAmount اقلام فاکتور)
+بستانکار 1200 موجودی کالا                    = SUM(CostAmount اقلام فاکتور)
+```
+ردیف‌های با مبلغ صفر (مثلاً بدون مالیات) اصلاً ساخته نمی‌شوند. اگر کل سند
+خالی شود (فاکتور با ارزش و بهای صفر — Edge Case نظری)، هیچ سندی Post
+نمی‌شود؛ فاکتور بدون رویداد حسابداری معنادار باقی می‌ماند که خودش صحیح
+است، نه یک نقص.
+
+**Atomicity (طبق قانون صریح Brief، حدس زده نشد):**
+`accounting_service.post_journal_entry()` قبلی همیشه Connection مستقل
+خودش را باز می‌کرد — فراخوانی آن از داخل `create_sales_invoice()` هیچ
+تضمین اتمیکی واقعی با تراکنش فروش نمی‌داد (دو Connection جدا روی SQL
+Server، نه یک Transaction). به‌جای حدس زدن یا استفاده از راه‌حل ضعیف‌تر
+(دو Commit جدا)، `accounting_service.py` Refactor شد: هسته ثبت سند
+(اعتبارسنجی + INSERT سربرگ/ردیف‌ها) به یک تابع داخلی جدید
+`_post_journal_entry_on_cursor(cursor, ...)` منتقل شد که هیچ commit/
+rollback/close ای انجام نمی‌دهد — کاملاً بی‌طرف نسبت به Transaction
+فراخوان. `post_journal_entry()` عمومی (بدون تغییر رفتار بیرونی، همان
+Signature و همان ۱۴ تست Phase 15.1 بدون تغییر سبز) حالا فقط یک Wrapper
+نازک روی همین تابع است که Connection/Commit/Rollback/Audit مستقل خودش را
+مدیریت می‌کند. `sales_service.create_sales_invoice()` مستقیماً همان
+`cursor` باز خودش را به `_post_journal_entry_on_cursor` می‌دهد — یعنی
+فاکتور فروش و سند حسابداری آن حالا **واقعاً یک Transaction اتمیک واحد
+روی SQL Server** هستند: یا هر دو با هم Commit می‌شوند، یا هر خطایی (شامل
+حساب گم‌شده/غیرفعال، یا موازنه‌نبودن) کل فاکتور (سربرگ، اقلام، کسر FIFO،
+موجودی، کاردکس، سریال/IMEI) را هم Rollback می‌کند. این دقیقاً همان تصمیم
+طراحی است که `ACCOUNTING_RULES.md` مطالبه می‌کند: «سندی که موازنه نداشته
+باشد هرگز نباید Post شود» — و اینجا یک قدم جلوتر: فاکتوری که سند
+حسابداری موازنه‌شده متناظرش ساخته نشود هم هرگز نباید Persist شود.
+
+**تفاوت عمدی با الگوی Audit (Phase 14.3):**
+`create_audit_entry` طبق تصمیم صریح Phase 14.3 عمداً Best-Effort است (خطای
+نوشتن Audit هرگز فروش واقعی را متوقف نمی‌کند، چون Audit ضمیمهٔ تراکنش است
+نه پیش‌نیاز آن). سند حسابداری برعکس است: طبق `ACCOUNTING_RULES.md` و رکن
+اول اولویت پروژه («پایداری و صحت حسابداری»)، پیش‌نیاز محسوب می‌شود — پس
+اگر Post نشود، کل فاکتور فروش هم Rollback می‌شود. این یک ناهم‌خوانی
+معماری نیست؛ دو رویداد متفاوت با دو سطح ضرورت متفاوت‌اند و این فاز آگاهانه
+هرکدام را طبق قوانین مخصوص خودشان رفتار داده.
+
+**Regression Tests (قبل از هرگونه تغییر در sales_service.py اضافه شد):**
+`tests/test_sales_service.py` — پوشش کامل رفتار *فعلی* فروش (که هیچ‌کدام
+نباید با اتصال Ledger بشکند): اعتبارسنجی ورودی (آیتم خالی، تعداد/قیمت
+نامعتبر، تعداد سریال نادرست)، FIFO تک‌لایه و چندلایه، خطای کمبود موجودی و
+Rollback کامل آن، حالت `AllowNegativeStock` فعال، بروزرسانی
+`CurrentStock`/`ProductCardex`، فروخته‌شدن سریال/IMEI، رد سریال غیرموجود.
+
+**تست‌های جدید اتصال Ledger:** سند موازنه‌شده با حساب‌های درست، وجود ردیف
+مالیات فقط وقتی `TaxAmount > 0`، افزایش `EntryNumber` بین چند فاکتور،
+مرجع `SourceTable`/`SourceID` صحیح، Rollback کامل فاکتور در صورت نبود
+یک حساب در Chart of Accounts (تست صریح Atomicity)، و تست خالص
+`_build_sales_journal_lines` (بدون دیتابیس) برای قوانین موازنه/فیلتر
+ردیف صفر/اعمال تخفیف روی درآمد نه روی طلب مشتری.
+
+نتیجه: `python -m pytest -q tests` → **56 passed** (۳۵ قبلی + ۲۱ جدید،
+همه ۳۵ تست قبلی بدون هیچ تغییری سبز ماندند).
+
+**عمداً در این فاز انجام نشد (طبق قانون صریح Brief):**
+- خرید، دریافت، پرداخت، برگشت، چک/اقساط — هیچ‌کدام تغییر نکردند و هنوز به
+  Ledger وصل نیستند (زیرفازهای بعدی).
+- هیچ Ledger Viewer/UI ای ساخته نشده.
+- بازطراحی کلی Chart of Accounts انجام نشد — فقط یک حساب واقعاً لازم
+  (مالیات) اضافه شد.
 
 ## Verification Update — Session Recovery Review
 

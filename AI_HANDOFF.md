@@ -4,10 +4,10 @@
 > اعتماد نکنید — GitHub مرجع اصلی است.
 
 ## LAST ACCOUNT
-Claude (Phase 15.1 — Accounting Core Foundation)
+Claude (Phase 15.2 — اتصال فروش به حسابداری دوطرفه)
 
 ## CURRENT PHASE
-15.1 — تکمیل‌شده (روی برنچ `phase/14-workflow-audit`)
+15.2 — تکمیل‌شده (روی برنچ `phase/14-workflow-audit`)
 
 ## CURRENT BRANCH
 `phase/14-workflow-audit`
@@ -16,82 +16,117 @@ Claude (Phase 15.1 — Accounting Core Foundation)
 انجام دهد.)
 
 ## LAST COMMIT
-`fd8c811` — feat(phase 15.1): accounting core foundation — Chart of
-Accounts + double-entry Journal Entries
-(روی `phase/14-workflow-audit`، Push انجام شد — این بار محیط توانست
-مستقیم Push کند؛ اگر اکانت بعدی نتوانست، همان روش Patch قبلی جواب داده بود.)
+جزئیات کامل Commit hashها در پیام نهایی همین Account به کاربر گزارش شده
+(چون این Account دسترسی Push نداشت — بخش «PUSH STATUS» پایین را ببینید).
+از `git log --oneline -6` روی `phase/14-workflow-audit` مطمئن شوید.
 
 ## COMPLETED (این اکانت)
-- Audit کامل مطابق دستور Brief: `git status`, `git log -10`, خواندن کامل
-  `PHASE_REGISTRY.md`/`AI_HANDOFF.md`، بررسی `services/`, `ui/`,
-  `database/migrations/*.sql`, `tests/`، و اجرای تست‌ها قبل از هر تغییر.
+- Audit کامل مطابق دستور Brief: `git log`, `git status`، خواندن کامل
+  `PHASE_REGISTRY.md`/`AI_HANDOFF.md`/`ACCOUNTING_RULES.md`، بررسی کامل
+  `services/sales_service.py`, `services/accounting_service.py`,
+  `services/financial_service.py`, `services/inventory_service.py`، و
+  اجرای کامل تست‌ها قبل از هر تغییر (Baseline: 35 passed، مطابق دقیق
+  Brief).
 - تأیید Baseline: کد واقعی روی GitHub دقیقاً با Brief مطابقت داشت
-  (`72e6390`, 21 تست موفق، Working Tree Clean).
-- تحلیل وضعیت واقعی Accounting: هیچ Double-Entry Ledger در پروژه وجود
-  نداشت (فقط Sub-Ledgerهای تک‌طرفه خوب‌ساخته — جزئیات کامل در
-  `PHASE_REGISTRY.md § Phase 15.1`).
-- ساخت Phase 15.1: Chart of Accounts + Journal Entries دوطرفه (Migration
-  `009_accounting_core.sql` + `services/accounting_service.py`) —
-  **عمداً هنوز به هیچ تراکنش تجاری وصل نشده.**
-- ۱۴ تست جدید، همه سبز؛ `py_compile` و `git diff --check` تمیز.
-- به‌روزرسانی `PHASE_REGISTRY.md`, `AI_HANDOFF.md` (همین فایل).
+  (`7e0167d`، 35 تست موفق، Working Tree Clean).
+- شناسایی و گزارش یک ابهام حسابداری واقعی (نه حدس‌زده): `TaxAmount`
+  فیلدی فعال در فاکتور فروش/خرید است اما Chart of Accounts هیچ حساب
+  بدهی برای مالیات دریافتی نداشت. حداقل رفع: یک Migration جدید
+  (`010_accounting_tax_payable.sql`) که فقط حساب `2200` را اضافه می‌کند.
+- Refactor کوچک و Backward-Compatible روی `services/accounting_service.py`:
+  استخراج هسته ثبت سند به `_post_journal_entry_on_cursor(cursor, ...)`
+  (بدون commit/rollback خودش) تا سرویس‌های تجاری بتوانند سند حسابداری را
+  در همان Transaction اتمیک خودشان ثبت کنند. `post_journal_entry()`
+  عمومی بدون تغییر رفتار/Signature باقی ماند؛ هر ۱۴ تست Phase 15.1 بدون
+  هیچ تغییری سبز ماندند.
+- `tests/test_sales_service.py` (جدید، قبل از تغییر `sales_service.py`
+  نوشته شد): پوشش کامل Regression رفتار فعلی فروش (FIFO تک/چندلایه،
+  کمبود موجودی، `AllowNegativeStock`، کاردکس، سریال/IMEI، اعتبارسنجی
+  ورودی) + تست‌های جدید اتصال Ledger (موازنه، ردیف مالیات شرطی، مرجع
+  Source، افزایش EntryNumber، Rollback کامل فاکتور در صورت خطای Ledger).
+- اتصال واقعی `services/sales_service.py::create_sales_invoice()` به
+  Ledger: یک سند حسابداری ترکیبی (AR/درآمد/مالیات + COGS/موجودی) در همان
+  Transaction اتمیک فاکتور فروش ثبت می‌شود؛ جزئیات کامل طراحی در
+  `PHASE_REGISTRY.md § Phase 15.2`.
+- `py_compile` روی فایل‌های تغییرکرده و `git diff --check` تمیز.
+- به‌روزرسانی `database/README.md`, `PHASE_REGISTRY.md`, `AI_HANDOFF.md`
+  (همین فایل).
 
 ## NOT COMPLETED / آگاهانه واگذارشده به فاز بعد
-این خودِ مأموریت صریح فاز بعدی است، نه یک نقص:
-- **هیچ تراکنش تجاری واقعی هنوز به Ledger جدید Post نمی‌شود.** فروش،
-  خرید، دریافت، پرداخت، چک و اقساط همچنان دقیقاً مثل قبل کار می‌کنند
-  (بدون تغییر) و اثری روی `JournalEntries` ندارند.
-- هیچ Ledger Viewer/UI ای برای دیدن اسناد حسابداری ساخته نشده.
+این خودِ مأموریت صریح فازهای بعدی است، نه یک نقص:
+- **خرید (Purchase) هنوز به Ledger وصل نیست.** پیشنهاد قبلی Phase 15.1
+  همچنان معتبر است: خرید ساده‌ترین فاز بعدی است (بدهکار موجودی کالا،
+  بستانکار حساب‌های پرداختنی + مالیات پرداختنی در صورت وجود؛ ساختار
+  آینه‌ای همین فاز).
+- **دریافت/پرداخت (Receipt/Payment) هنوز به Ledger وصل نیستند.** این‌ها
+  باید کاهش AR/AP در برابر افزایش/کاهش صندوق یا بانک را ثبت کنند —
+  می‌توانند به همان `_post_journal_entry_on_cursor` که این فاز اضافه کرد
+  متکی باشند (به همان روش که این فاز به آن متکی شد).
+- برگشت از فروش/خرید، چک، اقساط — هیچ‌کدام هنوز به Ledger وصل نیستند.
+- هیچ Ledger Viewer/UI ای ساخته نشده — طبق اولویت پروژه (UI آخرین
+  اولویت است).
 - `phase/14-workflow-audit` هنوز به `main` Merge نشده.
 - پاکسازی کامل Git History از فایل‌های Backup حساس هنوز انجام نشده (از
   Phase 12 به تعویق افتاده، نیاز به تصمیم صریح کاربر برای Force Push).
 
 ## FILES CHANGED (این اکانت)
 **ایجادشده:**
-`database/migrations/009_accounting_core.sql`, `services/accounting_service.py`,
-`tests/test_accounting_service.py`
+`database/migrations/010_accounting_tax_payable.sql`,
+`tests/test_sales_service.py`
 
 **تغییریافته:**
-`tests/test_smoke.py` (اضافه شدن `services.accounting_service` به لیست Import)،
-`database/README.md` (مستندسازی Migration 008 و 009)،
-`PHASE_REGISTRY.md`, `AI_HANDOFF.md`
+`services/sales_service.py` (اتصال به Ledger — `_build_sales_journal_lines`
++ فراخوانی `_post_journal_entry_on_cursor` قبل از `conn.commit()`)،
+`services/accounting_service.py` (Refactor: استخراج
+`_post_journal_entry_on_cursor`؛ هیچ تغییر رفتاری در `post_journal_entry()`
+عمومی)،
+`database/README.md`, `PHASE_REGISTRY.md`, `AI_HANDOFF.md`
 
 ## DATABASE CHANGES
-یک Migration جدید و امن (`009_accounting_core.sql`، الگوی
-`IF OBJECT_ID(...) IS NULL` مثل بقیه Migrationها) که باید توسط کاربر روی
-دیتابیس واقعی‌اش اجرا شود. هیچ جدول موجودی تغییر یا حذف نشد. Seed حساب‌ها
-هم Idempotent است (`IF NOT EXISTS ... WHERE Code = ...`).
+یک Migration جدید و امن (`010_accounting_tax_payable.sql`، همان الگوی
+`IF NOT EXISTS ... WHERE Code = ...` بقیه Seedها) که باید توسط کاربر روی
+دیتابیس واقعی‌اش اجرا شود (بعد از `009_accounting_core.sql`، قبل از
+استفاده واقعی از فروش با مالیات غیرصفر — وگرنه `post_journal_entry` با
+خطای «حساب با کد 2200 یافت نشد» کل فاکتور را Rollback می‌کند، طبق طراحی
+عمدی این فاز). هیچ جدول موجودی تغییر یا حذف نشد.
 
 ## TESTS
-`python -m pytest -q tests` → **35 passed** (۲۱ قبل از این اکانت + ۱۴ جدید).
-`python -m py_compile services/accounting_service.py tests/test_accounting_service.py tests/test_smoke.py` → بدون خطا.
+`python -m pytest -q tests` → **56 passed** (۳۵ قبل از این اکانت + ۲۱ جدید،
+هیچ‌کدام از ۳۵ تست قبلی تغییر نکردند).
+`python -m py_compile services/sales_service.py services/accounting_service.py tests/test_sales_service.py` → بدون خطا.
 `git diff --check` → بدون خطای Whitespace.
 
-## NEXT PHASE — پیشنهاد مشخص برای اکانت بعدی (15.2)
-اتصال اولین تراکنش تجاری واقعی به Ledger جدید. پیشنهاد: **فروش** (Sales)
-چون ساده‌ترین است — بهای تمام‌شده FIFO از قبل در
-`SalesInvoiceItems.CostAmount` محاسبه و ذخیره می‌شود، پس منطق سند
-حسابداری آن تقریباً این شکل است (طرح اولیه، نه دستور قطعی؛ اکانت بعدی
-باید خودش دقیق طراحی کند):
+⚠️ محیط Sandbox این Account به‌صورت پیش‌فرض `libodbc.so.2` و `jdatetime`
+نداشت (لازم برای Import شدن `database/db.py` و `utils/persian_date.py`)؛
+با `apt-get install unixodbc unixodbc-dev` و `pip install jdatetime` رفع
+شد. اگر Account بعدی با همین خطا مواجه شد، دلیلش نقص در `sales_service.py`
+نیست — نقص محیط است.
 
-```
-بدهکار   1100 حساب‌های دریافتنی   PayableAmount
-بستانکار 4000 درآمد فروش          TotalAmount - DiscountAmount
-بستانکار (مالیات، اگر مدل‌سازی شود)  TaxAmount
----
-بدهکار   5000 بهای تمام‌شده کالای فروش‌رفته   SUM(CostAmount)
-بستانکار 1200 موجودی کالا                    SUM(CostAmount)
-```
+## PUSH STATUS
+این Account به Repository دسترسی Push نداشت (بدون Token/Credential در
+Sandbox). تمام تغییرات به‌صورت Commitهای محلی روی `phase/14-workflow-audit`
+(بر پایه دقیق `7e0167d`) آماده و تست‌شده‌اند، اما **Push نشده‌اند** —
+کاربر باید آن‌ها را از طریق Patch/Bundle ارائه‌شده در پیام نهایی، اعمال و
+Push کند (دقیقاً همان روشی که طبق یادداشت Phase 14.3 قبلاً هم جواب داده
+بود).
 
+## NEXT PHASE — پیشنهاد مشخص برای اکانت بعدی (15.3)
+اتصال **خرید (Purchase)** به Ledger — آینه دقیق همین فاز:
+```
+بدهکار   1200 موجودی کالا            = SUM(qty*price - discount اقلام)
+بدهکار   2200 مالیات (اگر مدل شود؛ برای خرید معمولاً «مالیات قابل کسر»
+              است نه بدهی — این را حتماً با دقت طراحی کن، مستقیماً کپی
+              رفتار فروش نکن چون جهت حسابداری آن معکوس است)
+بستانکار 2000 حساب‌های پرداختنی      = PayableAmount
+```
 نکات مهم برای اکانت بعدی:
-- این باید در همان Transaction اتمیک `create_sales_invoice()` (یا
-  بلافاصله بعد از Commit موفق آن، با استفاده از `invoice_id` واقعی به‌عنوان
-  `source_id="SalesInvoices"`) فراخوانی شود، نه جدا و غیرهمگام.
-- قبل از هرگونه تغییر در `sales_service.py`، حتماً تست‌های موجود (که فعلاً
-  صفر است — `sales_service.py` هیچ تست ندارد) را با یک Regression Test
-  پوشش بده تا مطمئن شوی وصل‌کردن Ledger چیزی را در مسیر فروش خراب نمی‌کند.
-- اگر مدل مالیات/تخفیف در سطح فاکتور با ساختار Chart of Accounts فعلی
-  جور در نمی‌آید، این را به‌عنوان «ابهام حسابداری» طبق قانون Brief متوقف
-  کن و گزارش بده، پیش از پیاده‌سازی حدسی.
-- بعد از فروش: خرید (Purchase) → دریافت/پرداخت → برگشت‌ها → چک/اقساط،
-  هرکدام یک زیرفاز مستقل و قابل Commit جدا.
+- از همان `services.accounting_service._post_journal_entry_on_cursor`
+  استفاده کن، دقیقاً مثل این فاز — سیستم حسابداری موازی نساز.
+- قبل از تغییر `inventory_service.py::create_purchase_invoice`، حتماً یک
+  فایل Regression مثل `tests/test_sales_service.py` برای آن بنویس (فعلاً
+  صفر تست دارد).
+- به AR/COGS خرید حساسیت خاص نشان بده — بر خلاف فروش، خرید COGS ندارد
+  (کالا وارد انبار می‌شود، از انبار خارج نمی‌شود)؛ سند خرید فقط یک زوج
+  بدهکار/بستانکار ساده‌تر لازم دارد (موجودی در برابر پرداختنی)، نه دو
+  زوج مثل فروش. این را حدس نزن — اگر ابهامی در جهت مالیات خرید (بدهکار
+  یا بستانکار) دیدی، طبق قانون Brief متوقف کن و گزارش بده.
