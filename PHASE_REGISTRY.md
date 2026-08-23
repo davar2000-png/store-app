@@ -54,3 +54,23 @@ Verified:
   - `SalesInvoicesWindow` receives and keeps `session_id`.
 
 Previous concerns about missing wiring are resolved.
+
+## Verification Update — AutoSave UI Wiring
+
+Verified:
+- Purchase window AutoSave connected.
+  - QTimer interval: 60000 ms
+  - timeout -> autosave()
+  - autosave() -> draft_service.save_draft()
+
+- Sales window AutoSave connected.
+  - QTimer interval: 60000 ms
+  - timeout -> autosave()
+  - autosave() -> draft_service.save_draft()
+
+Power Failure Protection status:
+- Session Recovery: Verified
+- Crash Detection: Verified
+- Draft Save: Verified
+- Draft Restore: Verified
+- UI AutoSave: Verified
