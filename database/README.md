@@ -19,6 +19,7 @@
 | 007_session_recovery.sql | (Phase 12) پایه Session/Draft برای مقاومت در برابر قطع برق |
 | 008_audit_logs.sql | (Phase 14) Audit Trail — `AuditLogs` |
 | 009_accounting_core.sql | (Phase 15.1) Chart of Accounts + Journal Entries — **فقط زیرساخت، هنوز به هیچ تراکنش تجاری وصل نشده** (جزئیات در `PHASE_REGISTRY.md`) |
+| 010_accounting_tax_payable.sql | (Phase 15.2) افزودن حساب `2200` (مالیات دریافتنی از مشتری/پرداختنی به سازمان مالیاتی) — برای موازنه سند حسابداری فروش وقتی `TaxAmount > 0` باشد (جزئیات در `PHASE_REGISTRY.md`) |
 
 ## قانون طلایی
 هرگز `schema/001_fresh_install.sql` را روی دیتابیسی که کاربر واقعی و داده واقعی دارد اجرا نکنید. همیشه از `migrations/` به ترتیب شماره استفاده کنید، و همیشه قبل از اجرای هر Migration، از دیتابیس Backup بگیرید.
