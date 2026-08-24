@@ -560,7 +560,7 @@ def create_purchase_return_invoice(original_invoice_id: int, shamsi_date: str,
             )
 
         conn.commit()
-        create_audit_entry(user_id, "Create", "PurchaseInvoices", return_invoice_id, f"Purchase invoice {invoice_number}")
+        create_audit_entry(user_id, "Create", "PurchaseReturnInvoices", return_invoice_id, f"Purchase return invoice {invoice_number}")
         return return_invoice_id, invoice_number
 
     except Exception:
