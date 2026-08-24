@@ -31,7 +31,11 @@ import copy
 import pytest
 
 import services.inventory_service as inventory_service
-from services.inventory_service import InventoryError, _build_purchase_journal_lines
+from services.inventory_service import (
+    InventoryError,
+    _build_purchase_journal_lines,
+    _build_purchase_return_journal_lines,
+)
 from services.accounting_service import AccountingError
 
 
@@ -109,10 +113,13 @@ class _FakeCursor:
 
         if normalized.startswith("INSERT INTO PRODUCTSERIALS"):
             product_ref, serial_number, imei, layer_ref = params
+            new_id = state["_next_serial_id"]
+            state["_next_serial_id"] += 1
             state["serials"].append({
-                "ProductRef": product_ref, "SerialNumber": serial_number, "IMEI": imei,
-                "Status": "InStock", "PurchaseLayerRef": layer_ref,
+                "ID": new_id, "ProductRef": product_ref, "SerialNumber": serial_number,
+                "IMEI": imei, "Status": "InStock", "PurchaseLayerRef": layer_ref,
             })
+            state["_last_identity"] = new_id
             self._last_result = None
             return
 
@@ -122,20 +129,99 @@ class _FakeCursor:
             state["products"][product_id]["PurchasePrice"] = price
             return
 
+        if normalized.startswith("UPDATE PRODUCTS SET CURRENTSTOCK = CURRENTSTOCK - ?"):
+            qty, product_id = params
+            state["products"][product_id]["CurrentStock"] -= qty
+            return
+
         if normalized.startswith("SELECT CURRENTSTOCK FROM PRODUCTS WHERE ID = ?"):
             product_id = params[0]
             self._last_result = (state["products"][product_id]["CurrentStock"],)
             return
 
         if normalized.startswith("INSERT INTO PRODUCTCARDEX"):
-            (product_ref, shamsi_date, invoice_ref, in_qty, unit_price,
+            is_return = "N'BUYRETURN'" in normalized
+            (product_ref, shamsi_date, ref_id, moved_qty, unit_price,
              balance, description, user_ref) = params
-            state["cardex"].append({
-                "ProductRef": product_ref, "ShamsiDate": shamsi_date, "RefID": invoice_ref,
-                "InQuantity": in_qty, "UnitPrice": unit_price, "BalanceQuantity": balance,
+            entry = {
+                "ProductRef": product_ref, "ShamsiDate": shamsi_date, "RefID": ref_id,
+                "UnitPrice": unit_price, "BalanceQuantity": balance,
+                "Description": description, "UserRef": user_ref,
+            }
+            if is_return:
+                entry["MovementType"] = "BuyReturn"
+                entry["RefTable"] = "PurchaseReturnInvoices"
+                entry["InQuantity"] = 0
+                entry["OutQuantity"] = moved_qty
+            else:
+                entry["MovementType"] = "Buy"
+                entry["RefTable"] = "PurchaseInvoices"
+                entry["InQuantity"] = moved_qty
+                entry["OutQuantity"] = 0
+            state["cardex"].append(entry)
+            self._last_result = None
+            return
+
+        # --- هسته create_purchase_return_invoice (Phase 15.6) ---
+        if normalized.startswith("SELECT PERSONREF, INVOICENUMBER FROM PURCHASEINVOICES WHERE ID = ? AND ISDELETED = 0"):
+            invoice_id = params[0]
+            inv = next((i for i in state["invoices"]
+                        if i["ID"] == invoice_id and not i.get("IsDeleted", False)), None)
+            self._last_result = (inv["PersonRef"], inv["InvoiceNumber"]) if inv else None
+            return
+
+        if normalized.startswith("SELECT ISNULL(MAX(INVOICENUMBER), 4000)"):
+            next_num = max((r["InvoiceNumber"] for r in state["return_invoices"]), default=4000) + 1
+            self._last_result = (next_num,)
+            return
+
+        if normalized.startswith("INSERT INTO PURCHASERETURNINVOICES"):
+            (invoice_number, person_ref, original_invoice_ref, shamsi_date,
+             total_amount, payable_amount, description, user_ref) = params
+            new_id = state["_next_return_invoice_id"]
+            state["_next_return_invoice_id"] += 1
+            state["return_invoices"].append({
+                "ID": new_id, "InvoiceNumber": invoice_number, "PersonRef": person_ref,
+                "OriginalPurchaseInvoiceRef": original_invoice_ref, "ShamsiDate": shamsi_date,
+                "TotalAmount": total_amount, "PayableAmount": payable_amount,
                 "Description": description, "UserRef": user_ref,
             })
+            state["_last_identity"] = new_id
             self._last_result = None
+            return
+
+        if normalized.startswith("SELECT REMAININGQUANTITY FROM PRODUCTPURCHASELAYERS WHERE ID = ?"):
+            layer_id = params[0]
+            layer = next((l for l in state["layers"] if l["ID"] == layer_id), None)
+            self._last_result = (layer["RemainingQuantity"],) if layer else None
+            return
+
+        if normalized.startswith("INSERT INTO PURCHASERETURNINVOICEITEMS"):
+            (invoice_ref, product_ref, qty, unit_price, total_price, description) = params
+            state["return_items"].append({
+                "InvoiceRef": invoice_ref, "ProductRef": product_ref, "Quantity": qty,
+                "UnitPrice": unit_price, "DiscountAmount": 0, "TotalPrice": total_price,
+                "Description": description,
+            })
+            self._last_result = None
+            return
+
+        if normalized.startswith("UPDATE PRODUCTPURCHASELAYERS SET REMAININGQUANTITY = REMAININGQUANTITY - ?"):
+            qty, layer_id = params
+            layer = next(l for l in state["layers"] if l["ID"] == layer_id)
+            layer["RemainingQuantity"] -= qty
+            return
+
+        if normalized.startswith("SELECT STATUS, PURCHASELAYERREF FROM PRODUCTSERIALS WHERE ID = ?"):
+            serial_id = params[0]
+            serial = next((s for s in state["serials"] if s["ID"] == serial_id), None)
+            self._last_result = (serial["Status"], serial["PurchaseLayerRef"]) if serial else None
+            return
+
+        if normalized.startswith("UPDATE PRODUCTSERIALS SET STATUS = N'RETURNED' WHERE ID = ?"):
+            serial_id = params[0]
+            serial = next(s for s in state["serials"] if s["ID"] == serial_id)
+            serial["Status"] = "Returned"
             return
 
         # --- هسته accounting_service._post_journal_entry_on_cursor ---
@@ -250,6 +336,8 @@ class _FakeDatabase:
             "invoices": [],
             "items": [],
             "cardex": [],
+            "return_invoices": [],
+            "return_items": [],
             "accounts": [
                 {"ID": 1, "Code": "1200", "Name": "موجودی کالا", "IsActive": True},
                 {"ID": 2, "Code": "1400", "Name": "مالیات خرید", "IsActive": True},
@@ -262,6 +350,8 @@ class _FakeDatabase:
             "_next_item_id": 1,
             "_next_layer_id": 1,
             "_next_journal_id": 1,
+            "_next_serial_id": 1,
+            "_next_return_invoice_id": 1,
             "_last_identity": None,
         }
 
@@ -282,6 +372,30 @@ def setup_function():
 
 def _basic_item(qty=5, price=200.0, discount=0.0, **extra):
     item = {"product_id": 1, "quantity": qty, "unit_price": price, "discount": discount}
+    item.update(extra)
+    return item
+
+
+def _create_base_purchase(qty=5, price=200.0, has_serial=False, serials=None):
+    """یک فاکتور خرید پایه می‌سازد که فاکتور برگشت روی آن ثبت می‌شود.
+    شناسه فاکتور، شماره فاکتور و شناسه لایه FIFO ساخته‌شده را برمی‌گرداند."""
+    item = _basic_item(qty=qty, price=price)
+    if has_serial:
+        item["has_serial"] = True
+        item["serials"] = serials or [f"SN-{i}" for i in range(int(qty))]
+    invoice_id, invoice_number = inventory_service.create_purchase_invoice(
+        1, "1404-06-01", 0, 0, "", 1, [item]
+    )
+    state = _FakeDatabase._shared_state
+    layer_id = state["layers"][-1]["ID"]
+    return invoice_id, invoice_number, layer_id
+
+
+def _return_item(qty=5, price=200.0, layer_id=1, serial_ids=None, **extra):
+    item = {"product_id": 1, "quantity": qty, "unit_price": price, "layer_id": layer_id}
+    if serial_ids is not None:
+        item["has_serial"] = True
+        item["serial_ids"] = serial_ids
     item.update(extra)
     return item
 
@@ -522,3 +636,263 @@ def test_build_purchase_journal_lines_uses_raw_inventory_amount_not_net_of_disco
     )
     inv_line = next(l for l in lines if l["account_code"] == "1200")
     assert inv_line["debit"] == 1200  # نه 1200-40
+
+
+# =========================================================
+# Phase 15.6 — اتصال برگشت از خرید به حسابداری دوطرفه
+# =========================================================
+#
+# ۱) Regression — رفتار **فعلی** create_purchase_return_invoice (کاهش لایه
+#    FIFO، کاهش موجودی، برگرداندن وضعیت سریال/IMEI، کاردکس BuyReturn،
+#    اعتبارسنجی ورودی، رد برگشت بیش از موجودی باقیمانده لایه، Rollback) که
+#    باید دقیقاً همان‌طور که قبل از این فاز کار می‌کرد ادامه یابد، به‌علاوه
+#    رفع باگ از قبل موجود: فراخوانی create_audit_entry با متغیر نامعتبر
+#    invoice_id باعث می‌شد یک برگشت موفق، بعد از commit، با NameError خطا
+#    بدهد. این فاز آن متغیر را به return_invoice_id اصلاح می‌کند.
+# ۲) اتصال Ledger — سند حسابداری دوطرفه‌ای که حالا برای هر فاکتور برگشت از
+#    خرید در همان Transaction اتمیک ساخته می‌شود:
+#        بدهکار   2000 حساب‌های پرداختنی = TotalAmount
+#        بستانکار 1200 موجودی کالا       = TotalAmount
+#    بدون مالیات/تخفیف (طبق تصمیم صریح Brief).
+
+def test_create_purchase_return_invoice_requires_at_least_one_item():
+    _create_base_purchase(qty=5, price=200.0)
+    with pytest.raises(InventoryError):
+        inventory_service.create_purchase_return_invoice(1, "1404-06-05", "", 1, [])
+    state = _FakeDatabase._shared_state
+    assert state["return_invoices"] == []
+
+
+def test_create_purchase_return_invoice_ignores_zero_quantity_items_and_then_rejects_empty():
+    _create_base_purchase(qty=5, price=200.0)
+    with pytest.raises(InventoryError):
+        inventory_service.create_purchase_return_invoice(
+            1, "1404-06-05", "", 1, [_return_item(qty=0, price=200.0, layer_id=1)]
+        )
+
+
+def test_create_purchase_return_invoice_rejects_negative_price():
+    _create_base_purchase(qty=5, price=200.0)
+    with pytest.raises(InventoryError):
+        inventory_service.create_purchase_return_invoice(
+            1, "1404-06-05", "", 1, [_return_item(qty=1, price=-1, layer_id=1)]
+        )
+
+
+def test_create_purchase_return_invoice_requires_matching_serial_count():
+    _create_base_purchase(qty=2, price=200.0, has_serial=True)
+    item = _return_item(qty=2, price=200.0, layer_id=1, serial_ids=[1])  # فقط یک سریال به‌جای دو
+    with pytest.raises(InventoryError):
+        inventory_service.create_purchase_return_invoice(1, "1404-06-05", "", 1, [item])
+
+
+def test_create_purchase_return_invoice_rejects_unknown_original_invoice():
+    with pytest.raises(InventoryError):
+        inventory_service.create_purchase_return_invoice(
+            999, "1404-06-05", "", 1, [_return_item(qty=1, price=200.0, layer_id=1)]
+        )
+
+
+def test_create_purchase_return_invoice_decrements_fifo_remaining_quantity():
+    _create_base_purchase(qty=5, price=200.0)
+    inventory_service.create_purchase_return_invoice(
+        1, "1404-06-05", "", 1, [_return_item(qty=2, price=200.0, layer_id=1)]
+    )
+    state = _FakeDatabase._shared_state
+    assert state["layers"][0]["RemainingQuantity"] == 3
+
+
+def test_create_purchase_return_invoice_decrements_product_stock():
+    _create_base_purchase(qty=5, price=200.0)  # CurrentStock: 10 + 5 = 15
+    inventory_service.create_purchase_return_invoice(
+        1, "1404-06-05", "", 1, [_return_item(qty=2, price=200.0, layer_id=1)]
+    )
+    state = _FakeDatabase._shared_state
+    assert state["products"][1]["CurrentStock"] == 13
+
+
+def test_create_purchase_return_invoice_marks_serials_returned():
+    _create_base_purchase(qty=1, price=200.0, has_serial=True, serials=["SN-R1"])
+    state = _FakeDatabase._shared_state
+    serial_id = state["serials"][0]["ID"]
+    inventory_service.create_purchase_return_invoice(
+        1, "1404-06-05", "", 1, [_return_item(qty=1, price=200.0, layer_id=1, serial_ids=[serial_id])]
+    )
+    assert state["serials"][0]["Status"] == "Returned"
+
+
+def test_create_purchase_return_invoice_rejects_serial_not_in_stock():
+    _create_base_purchase(qty=1, price=200.0, has_serial=True, serials=["SN-R2"])
+    state = _FakeDatabase._shared_state
+    serial_id = state["serials"][0]["ID"]
+    state["serials"][0]["Status"] = "Sold"  # قبلاً فروخته شده
+    with pytest.raises(InventoryError):
+        inventory_service.create_purchase_return_invoice(
+            1, "1404-06-05", "", 1, [_return_item(qty=1, price=200.0, layer_id=1, serial_ids=[serial_id])]
+        )
+
+
+def test_create_purchase_return_invoice_creates_buyreturn_cardex_entry():
+    _create_base_purchase(qty=5, price=200.0)
+    return_invoice_id, _ = inventory_service.create_purchase_return_invoice(
+        1, "1404-06-05", "", 1, [_return_item(qty=2, price=200.0, layer_id=1)]
+    )
+    state = _FakeDatabase._shared_state
+    cardex_entry = state["cardex"][-1]
+    assert cardex_entry["MovementType"] == "BuyReturn"
+    assert cardex_entry["RefTable"] == "PurchaseReturnInvoices"
+    assert cardex_entry["RefID"] == return_invoice_id
+    assert cardex_entry["OutQuantity"] == 2
+    assert cardex_entry["InQuantity"] == 0
+
+
+def test_create_purchase_return_invoice_rejects_over_return_beyond_remaining_layer_quantity():
+    """اگر بخشی از لایه قبلاً فروخته شده باشد (RemainingQuantity کمتر از
+    OriginalQuantity)، برگشت بیش از باقیمانده باید رد شود."""
+    _create_base_purchase(qty=5, price=200.0)
+    state = _FakeDatabase._shared_state
+    state["layers"][0]["RemainingQuantity"] = 3  # فرض: ۲ واحد قبلاً فروخته شده
+    with pytest.raises(InventoryError):
+        inventory_service.create_purchase_return_invoice(
+            1, "1404-06-05", "", 1, [_return_item(qty=4, price=200.0, layer_id=1)]
+        )
+    assert state["return_invoices"] == []
+
+
+def test_create_purchase_return_invoice_succeeds_without_nameerror_and_writes_audit():
+    """رگرسیون اصلی این فاز: قبلاً یک برگشت موفق بعد از commit با NameError
+    (متغیر نامعتبر invoice_id در create_audit_entry) خطا می‌داد. حالا باید
+    بدون هیچ Exception ای کامل شود."""
+    _create_base_purchase(qty=5, price=200.0)
+    return_invoice_id, invoice_number = inventory_service.create_purchase_return_invoice(
+        1, "1404-06-05", "", 1, [_return_item(qty=2, price=200.0, layer_id=1)]
+    )
+    assert return_invoice_id is not None
+    assert invoice_number is not None
+    state = _FakeDatabase._shared_state
+    assert len(state["return_invoices"]) == 1
+
+
+def test_create_purchase_return_invoice_rolls_back_everything_on_failure():
+    """اگر یکی از اقلام برگشت نامعتبر باشد (مثلاً بیش از موجودی باقیمانده
+    لایه)، کل فاکتور برگشت (سربرگ، اقلام، لایه FIFO، سریال، موجودی، کاردکس،
+    سند حسابداری) باید Rollback شود — نه فقط بخشی از آن."""
+    _create_base_purchase(qty=5, price=200.0)
+    state = _FakeDatabase._shared_state
+    stock_before = state["products"][1]["CurrentStock"]
+    journal_entries_before = len(state["journal_entries"])  # سند فاکتور خرید پایه
+
+    with pytest.raises(InventoryError):
+        inventory_service.create_purchase_return_invoice(
+            1, "1404-06-05", "", 1, [
+                _return_item(qty=2, price=200.0, layer_id=1),   # قلم معتبر
+                _return_item(qty=100, price=200.0, layer_id=1),  # قلم نامعتبر (بیش از باقیمانده)
+            ]
+        )
+
+    assert state["return_invoices"] == []
+    assert state["return_items"] == []
+    assert len(state["journal_entries"]) == journal_entries_before  # هیچ سند جدیدی اضافه نشد
+    assert state["products"][1]["CurrentStock"] == stock_before
+    assert state["layers"][0]["RemainingQuantity"] == 5  # لایه FIFO دست‌نخورده
+
+
+# --- اتصال Ledger ---
+
+def test_create_purchase_return_invoice_posts_balanced_journal_entry():
+    _create_base_purchase(qty=5, price=200.0)
+    return_invoice_id, _ = inventory_service.create_purchase_return_invoice(
+        1, "1404-06-05", "", 1, [_return_item(qty=2, price=200.0, layer_id=1)]
+    )
+    state = _FakeDatabase._shared_state
+
+    # یک سند برای فاکتور خرید پایه (Phase 15.3) + یک سند برای این برگشت
+    assert len(state["journal_entries"]) == 2
+    entry = next(e for e in state["journal_entries"] if e["SourceTable"] == "PurchaseReturnInvoices")
+    assert entry["SourceID"] == return_invoice_id
+
+    # فقط ردیف‌های همین سند برگشت (نه سند فاکتور خرید پایه) را بررسی می‌کنیم
+    lines = [l for l in state["journal_lines"] if l["JournalEntryRef"] == entry["ID"]]
+    total_debit = sum(l["Debit"] for l in lines)
+    total_credit = sum(l["Credit"] for l in lines)
+    assert total_debit == total_credit  # موازنه واقعی
+
+    accounts_by_id = {a["ID"]: a["Code"] for a in state["accounts"]}
+    debit_ap = next(l["Debit"] for l in lines if accounts_by_id[l["AccountRef"]] == "2000")
+    credit_inv = next(l["Credit"] for l in lines if accounts_by_id[l["AccountRef"]] == "1200")
+
+    # 2 * 200 = 400
+    assert debit_ap == 400.0
+    assert credit_inv == 400.0
+
+
+def test_create_purchase_return_invoice_journal_entry_number_increments_after_purchase_entry():
+    """شماره سند حسابداری برگشت باید ادامهٔ سری سند فاکتور خرید اصلی باشد،
+    نه از نو شروع شود (هر دو در همان دفتر روزنامه مشترک ثبت می‌شوند)."""
+    _create_base_purchase(qty=5, price=200.0)  # سند شماره ۱ (فاکتور خرید)
+    inventory_service.create_purchase_return_invoice(
+        1, "1404-06-05", "", 1, [_return_item(qty=2, price=200.0, layer_id=1)]
+    )
+    state = _FakeDatabase._shared_state
+    numbers = sorted(e["EntryNumber"] for e in state["journal_entries"])
+    assert numbers == [1, 2]
+
+
+def test_create_purchase_return_invoice_rolls_back_when_account_missing():
+    """اگر Chart of Accounts حساب لازم (1200 یا 2000) را نداشته باشد، کل
+    فاکتور برگشت باید Rollback شود."""
+    _create_base_purchase(qty=5, price=200.0)
+    state = _FakeDatabase._shared_state
+    journal_entries_before = len(state["journal_entries"])
+    state["accounts"] = [a for a in state["accounts"] if a["Code"] != "1200"]
+
+    with pytest.raises(AccountingError):
+        inventory_service.create_purchase_return_invoice(
+            1, "1404-06-05", "", 1, [_return_item(qty=2, price=200.0, layer_id=1)]
+        )
+
+    assert state["return_invoices"] == []
+    assert len(state["journal_entries"]) == journal_entries_before  # هیچ سند جدیدی اضافه نشد
+    assert state["layers"][0]["RemainingQuantity"] == 5
+    assert state["products"][1]["CurrentStock"] == 15  # موجودی هم دست‌نخورده
+
+
+def test_create_purchase_return_invoice_rolls_back_when_account_inactive():
+    _create_base_purchase(qty=5, price=200.0)
+    state = _FakeDatabase._shared_state
+    journal_entries_before = len(state["journal_entries"])
+    next(a for a in state["accounts"] if a["Code"] == "2000")["IsActive"] = False
+
+    with pytest.raises(AccountingError):
+        inventory_service.create_purchase_return_invoice(
+            1, "1404-06-05", "", 1, [_return_item(qty=2, price=200.0, layer_id=1)]
+        )
+
+    assert state["return_invoices"] == []
+    assert len(state["journal_entries"]) == journal_entries_before
+
+
+# --- _build_purchase_return_journal_lines: تست خالص (بدون دیتابیس) ---
+
+def test_build_purchase_return_journal_lines_balanced_pure():
+    lines = _build_purchase_return_journal_lines(total_amount=400.0)
+    assert sum(l.get("debit", 0) for l in lines) == sum(l.get("credit", 0) for l in lines)
+    codes = {l["account_code"] for l in lines}
+    assert codes == {"2000", "1200"}
+
+
+def test_build_purchase_return_journal_lines_correct_debit_credit_sides():
+    lines = _build_purchase_return_journal_lines(total_amount=400.0)
+    debit_line = next(l for l in lines if l["account_code"] == "2000")
+    credit_line = next(l for l in lines if l["account_code"] == "1200")
+    assert debit_line["debit"] == 400.0
+    assert "credit" not in debit_line or debit_line.get("credit", 0) == 0
+    assert credit_line["credit"] == 400.0
+    assert "debit" not in credit_line or credit_line.get("debit", 0) == 0
+
+
+def test_build_purchase_return_journal_lines_returns_empty_for_zero_amount():
+    """اگر مبلغ کل صفر باشد (مثلاً هر دو ردیف صفر)، هیچ ردیفی نباید ساخته
+    شود؛ فراخوان نباید یک سند حسابداری خالی Post کند."""
+    lines = _build_purchase_return_journal_lines(total_amount=0.0)
+    assert lines == []

@@ -83,6 +83,39 @@ def _build_purchase_journal_lines(inventory_amount: float, tax_amount: float,
     return lines
 
 
+def _build_purchase_return_journal_lines(total_amount: float) -> list:
+    """
+    ردیف‌های سند حسابداری دوطرفه یک فاکتور برگشت از خرید را می‌سازد (بدون
+    لمس دیتابیس؛ خالص و قابل تست مستقل) — طبق طراحی تأییدشده Phase 15.6:
+
+        بدهکار   2000 حساب‌های پرداختنی = TotalAmount (کاهش بدهی به تأمین‌کننده)
+        بستانکار 1200 موجودی کالا       = TotalAmount (کاهش موجودی کالا)
+
+    بر خلاف _build_purchase_journal_lines، این سند مالیات و تخفیف ندارد
+    (PurchaseReturnInvoices فیلد مالیات ندارد و تخفیف همیشه صفر است طبق
+    تصمیم صریح Brief) — پس فقط یک زوج ساده بدهکار/بستانکار دارد، نه چهار ردیف.
+
+    ردیفی که مبلغش صفر است اصلاً ساخته نمی‌شود؛ در آن صورت لیست خالی
+    برمی‌گردد و فراخوان نباید _post_journal_entry_on_cursor را با یک سند
+    خالی صدا بزند (همان قرارداد _build_purchase_journal_lines).
+    """
+    lines = []
+
+    if abs(total_amount) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_ACCOUNTS_PAYABLE,
+            "debit": total_amount,
+            "description": "کاهش بدهی به تأمین‌کننده بابت برگشت از خرید",
+        })
+        lines.append({
+            "account_code": ACCOUNT_INVENTORY,
+            "credit": total_amount,
+            "description": "کاهش موجودی کالا بابت برگشت از خرید",
+        })
+
+    return lines
+
+
 def get_suppliers():
     """لیست اشخاصی که به‌عنوان فروشنده/تأمین‌کننده علامت خورده‌اند"""
     db = Database()
@@ -508,8 +541,26 @@ def create_purchase_return_invoice(original_invoice_id: int, shamsi_date: str,
                  user_id)
             )
 
+        # --- ثبت سند حسابداری دوطرفه (Journal Entry) در همان Transaction اتمیک برگشت ---
+        # عمداً از همان Cursor/Connection فاکتور برگشت استفاده می‌شود (همان
+        # الگوی create_purchase_invoice در Phase 15.3) تا فاکتور برگشت و سند
+        # حسابداری آن یک واحد اتمیک باشند: یا هر دو Commit می‌شوند یا (در
+        # صورت هر خطایی، از جمله نبود یک حساب در Chart of Accounts) با هم
+        # کامل Rollback می‌شوند.
+        journal_lines = _build_purchase_return_journal_lines(total_amount=total_amount)
+        if journal_lines:
+            _post_journal_entry_on_cursor(
+                cursor,
+                shamsi_date=shamsi_date,
+                description=f"فاکتور برگشت خرید شماره {invoice_number}",
+                lines=journal_lines,
+                user_id=user_id,
+                source_table="PurchaseReturnInvoices",
+                source_id=return_invoice_id,
+            )
+
         conn.commit()
-        create_audit_entry(user_id, "Create", "PurchaseInvoices", invoice_id, f"Purchase invoice {invoice_number}")
+        create_audit_entry(user_id, "Create", "PurchaseInvoices", return_invoice_id, f"Purchase invoice {invoice_number}")
         return return_invoice_id, invoice_number
 
     except Exception:
