@@ -23,6 +23,11 @@ ACCOUNT_TAX_PAYABLE = "2200"           # مالیات دریافتنی از مش
 ACCOUNT_SALES_REVENUE = "4000"         # درآمد فروش
 ACCOUNT_COGS = "5000"                  # بهای تمام‌شده کالای فروش‌رفته
 
+# --- Phase 15.6.5: حساب استفاده‌شده برای سند حسابداری برگشت از فروش ---
+# در database/migrations/009_accounting_core.sql از قبل Seed شده است؛
+# اینجا دوباره ساخته نمی‌شود، فقط ارجاع داده می‌شود.
+ACCOUNT_SALES_RETURN = "4100"          # برگشت از فروش (Contra-Revenue)
+
 # مقادیر کوچک‌تر از این، ناشی از خطای گرد شدن اعشار در نظر گرفته می‌شوند و
 # ردیف حسابداری جداگانه‌ای برایشان ساخته نمی‌شود (نه صفر واقعی اقتصادی).
 _ZERO_TOLERANCE = 1e-9
@@ -336,6 +341,415 @@ def create_sales_invoice(customer_id: int, shamsi_date: str, discount_amount: fl
         conn.commit()
         create_audit_entry(user_id, "Create", "SalesInvoices", invoice_id, f"Sales invoice {invoice_number}")
         return invoice_id, invoice_number
+
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        db.close()
+
+
+# =========================================================
+# Phase 15.6.5 — برگشت از فروش (Sales Return Core)
+# =========================================================
+# الگوی این بخش دقیقاً آینه‌ی inventory_service.create_purchase_return_invoice
+# است (همان ساختار Transaction، همان الگوی Cardex/Journal)، با دو تفاوت
+# تجاری عمدی:
+#   ۱) بر خلاف برگشت از خرید (که هر لایه FIFO را مستقیماً UPDATE می‌کند اما
+#      خودِ SalesInvoiceItemLayers فروش اصلی هرگز Mutate نمی‌شود)، اینجا هر
+#      برگشت در SalesReturnInvoiceItemLayers ردیابی می‌شود تا برگشت جزئی/
+#      چندمرحله‌ای از یک قلم فروش، بدون از دست دادن سقف مجاز هر لایه، ممکن
+#      باشد. سقف مجاز هر لایه = مقداری که همان لایه در فروش اصلی مصرف کرده،
+#      منهای مجموع برگشت‌های قبلی ثبت‌شده روی همان رکورد مصرف.
+#   ۲) کالای سریالی هرگز وارد SalesReturnInvoiceItemLayers نمی‌شود؛ وضعیت
+#      خودِ سریال (Sold -> InStock) و ProductSerials.PurchaseLayerRef به‌جای
+#      آن، هم برای بازیابی موجودی لایه و هم برای جلوگیری از برگشت تکراری
+#      همان سریال، منبع حقیقت است.
+
+
+def _get_sales_invoice_item_returnable(cursor, sales_invoice_item_id: int) -> list:
+    """
+    رکوردهای مصرف FIFO یک قلم فروش (SalesInvoiceItemLayers) را به همراه
+    مقدار «هنوز قابل‌برگشت» هرکدام برمی‌گرداند (فقط خواندنی؛ چیزی را
+    تغییر نمی‌دهد). ترتیب رکوردها همان ترتیب مصرف اصلی (ID صعودی) است تا
+    برگشت هم به همان ترتیب (لایه‌ای که اول مصرف شده، اول بازیابی شود) انجام شود.
+
+    قابل‌برگشت هر رکورد = Quantity مصرف‌شده اصلی − مجموع برگشت‌های قبلی که
+    قبلاً روی همین رکورد (SalesInvoiceItemLayerRef) در SalesReturnInvoiceItemLayers
+    ثبت شده‌اند. این تنها منبع حقیقت برای سقف برگشت چندمرحله‌ای است.
+    """
+    cursor.execute(
+        """SELECT ID, PurchaseLayerRef, Quantity, UnitPrice
+           FROM SalesInvoiceItemLayers
+           WHERE SalesInvoiceItemRef = ?
+           ORDER BY ID""",
+        (sales_invoice_item_id,)
+    )
+    original_layers = cursor.fetchall()
+
+    result = []
+    for row in original_layers:
+        layer_ref_id, purchase_layer_id, consumed_qty, unit_price = (
+            int(row[0]), int(row[1]), float(row[2]), float(row[3])
+        )
+        cursor.execute(
+            """SELECT ISNULL(SUM(Quantity), 0) FROM SalesReturnInvoiceItemLayers
+               WHERE SalesInvoiceItemLayerRef = ?""",
+            (layer_ref_id,)
+        )
+        already_returned = float(cursor.fetchone()[0] or 0)
+        result.append({
+            "sales_invoice_item_layer_id": layer_ref_id,
+            "purchase_layer_id": purchase_layer_id,
+            "unit_price": unit_price,
+            "returnable_quantity": consumed_qty - already_returned,
+        })
+    return result
+
+
+def _build_sales_return_journal_lines(net_amount: float, tax_amount: float,
+                                       total_cost_amount: float) -> list:
+    """
+    ردیف‌های سند حسابداری دوطرفه یک فاکتور برگشت از فروش را می‌سازد (بدون
+    لمس دیتابیس؛ خالص و قابل تست مستقل) — طبق طراحی تأییدشده Phase 15.6.5:
+
+    دو رویداد اقتصادی هم‌زمان در یک سند ترکیبی ثبت می‌شود (دقیقاً معکوس
+    _build_sales_journal_lines):
+      ۱) کاهش درآمد و کاهش طلب از مشتری:
+         بدهکار   4100 برگشت از فروش   = net_amount (خالص اقلام برگشتی)
+         بدهکار   2200 مالیات دریافتنی = tax_amount (فقط اگر > 0)
+         بستانکار 1100 حساب‌های دریافتنی = net_amount + tax_amount
+      ۲) بازگشت بهای تمام‌شده کالای برگشتی به موجودی (معکوس COGS):
+         بدهکار   1200 موجودی کالا                     = total_cost_amount
+         بستانکار 5000 بهای تمام‌شده کالای فروش‌رفته    = total_cost_amount
+
+    حساب 4000 (درآمد فروش) عمداً هرگز در این سند ظاهر نمی‌شود — برگشت از
+    فروش یک رویداد اقتصادی جداگانه (Contra-Revenue) است، نه اصلاح مستقیم
+    سند فروش اصلی.
+
+    ردیف‌هایی که مبلغشان صفر است اصلاً ساخته نمی‌شوند؛ یک سند کاملاً خالی
+    هرگز نباید Post شود.
+    """
+    lines = []
+
+    payable = float(net_amount or 0) + float(tax_amount or 0)
+    net = float(net_amount or 0)
+    tax = float(tax_amount or 0)
+
+    if abs(net) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_SALES_RETURN,
+            "debit": net,
+            "description": "برگشت از فروش",
+        })
+    if abs(tax) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_TAX_PAYABLE,
+            "debit": tax,
+            "description": "کاهش مالیات دریافتنی بابت برگشت از فروش",
+        })
+    if abs(payable) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_ACCOUNTS_RECEIVABLE,
+            "credit": payable,
+            "description": "کاهش طلب از مشتری بابت برگشت از فروش",
+        })
+
+    if abs(total_cost_amount) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_INVENTORY,
+            "debit": total_cost_amount,
+            "description": "بازگشت بهای کالای برگشتی به موجودی",
+        })
+        lines.append({
+            "account_code": ACCOUNT_COGS,
+            "credit": total_cost_amount,
+            "description": "کاهش بهای تمام‌شده کالای فروش‌رفته بابت برگشت",
+        })
+
+    return lines
+
+
+def get_sales_return_invoices(search: str = ""):
+    db = Database()
+    like = f"%{search.strip()}%"
+    rows = db.fetch_all(
+        """SELECT sri.ID, sri.InvoiceNumber, sri.ShamsiDate, p.FullName AS CustomerName,
+                  sri.PayableAmount, sri.Description, si.InvoiceNumber AS OriginalInvoiceNumber
+           FROM SalesReturnInvoices sri
+           JOIN Persons p ON p.ID = sri.PersonRef
+           LEFT JOIN SalesInvoices si ON si.ID = sri.OriginalSalesInvoiceRef
+           WHERE sri.IsDeleted = 0 AND
+                 (CAST(sri.InvoiceNumber AS NVARCHAR(50)) LIKE ? OR p.FullName LIKE ?)
+           ORDER BY sri.ID DESC""",
+        (like, like)
+    )
+    db.close()
+    return rows
+
+
+def get_sales_return_invoice_items(invoice_id: int):
+    db = Database()
+    rows = db.fetch_all(
+        """SELECT srii.ID, pr.Name AS ProductName, srii.Quantity, srii.UnitPrice,
+                  srii.TotalPrice, srii.CostAmount
+           FROM SalesReturnInvoiceItems srii
+           JOIN Products pr ON pr.ID = srii.ProductRef
+           WHERE srii.InvoiceRef = ?
+           ORDER BY srii.ID""",
+        (invoice_id,)
+    )
+    db.close()
+    return rows
+
+
+def get_sales_invoice_returnable_items(sales_invoice_id: int):
+    """
+    اقلام یک فاکتور فروش مشخص، همراه با حداکثر تعداد قابل‌برگشت در سطح قلم
+    (OriginalQuantity منهای مجموع Quantity تمام SalesReturnInvoiceItems قبلی
+    همان قلم). سقف نهایی و واقعی هنوز در سطح لایه توسط
+    _get_sales_invoice_item_returnable در create_sales_return_invoice کنترل
+    می‌شود؛ این تابع فقط برای نمایش راهنما به کاربر در UI است.
+    """
+    db = Database()
+    rows = db.fetch_all(
+        """SELECT sii.ID AS ItemID, pr.ID AS ProductID, pr.Name AS ProductName, pr.HasSerial,
+                  sii.Quantity AS OriginalQuantity, sii.UnitPrice,
+                  sii.Quantity - ISNULL((
+                      SELECT SUM(srii.Quantity) FROM SalesReturnInvoiceItems srii
+                      WHERE srii.SalesInvoiceItemRef = sii.ID
+                  ), 0) AS ReturnableQuantity
+           FROM SalesInvoiceItems sii
+           JOIN Products pr ON pr.ID = sii.ProductRef
+           WHERE sii.InvoiceRef = ?
+           ORDER BY sii.ID""",
+        (sales_invoice_id,)
+    )
+    db.close()
+    return rows
+
+
+def create_sales_return_invoice(original_invoice_id: int, shamsi_date: str, tax_amount: float,
+                                 description: str, user_id: int, items: list):
+    """
+    ثبت یک فاکتور برگشت از فروش کامل به‌صورت یکپارچه (Transaction):
+    سربرگ + اقلام + بازیابی لایه(های) FIFO مربوطه (یا بازگشت وضعیت سریال/
+    IMEI) + افزایش موجودی + کاردکس (MovementType='SellReturn') + سند
+    حسابداری دوطرفه.
+    اگر هر بخشی با خطا مواجه شود، هیچ‌کدام ذخیره نمی‌شود (rollback کامل).
+
+    items: لیستی از دیکشنری با کلیدهای:
+        item_id (SalesInvoiceItems.ID از فاکتور فروش اصلی), product_name (اختیاری،
+        فقط برای پیام خطا), quantity, has_serial, serial_ids (لیست ID از
+        ProductSerials - فقط برای کالای سریالی).
+
+    قیمت واحد هرگز از ورودی کاربر گرفته نمی‌شود؛ همیشه از خودِ
+    SalesInvoiceItems.UnitPrice فاکتور فروش اصلی خوانده می‌شود تا سند
+    برگشت هرگز نتواند با قیمتی متفاوت از فروش واقعی ثبت شود.
+    """
+    items = [i for i in items if float(i.get("quantity") or 0) > 0]
+    if not items:
+        raise SalesError("حداقل تعداد برگشتی یک قلم کالا را وارد کنید.")
+
+    for item in items:
+        qty = float(item["quantity"])
+        serial_ids = item.get("serial_ids") or []
+        if item.get("has_serial"):
+            if len(serial_ids) != int(qty):
+                raise SalesError(
+                    f"برای «{item.get('product_name', 'کالا')}» باید دقیقاً {int(qty)} سریال/IMEI انتخاب شود."
+                )
+            if len(serial_ids) != len(set(serial_ids)):
+                raise SalesError("انتخاب سریال/IMEی تکراری در یک درخواست برگشت مجاز نیست.")
+
+    db = Database()
+    conn = db.connect()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT PersonRef, InvoiceNumber FROM SalesInvoices WHERE ID = ? AND IsDeleted = 0",
+            (original_invoice_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise SalesError("فاکتور فروش اصلی پیدا نشد.")
+        customer_id, original_invoice_number = int(row[0]), int(row[1])
+
+        # --- پاس اول: قیمت واحد معتبر هر قلم را از خودِ فاکتور فروش اصلی می‌خوانیم ---
+        resolved_items = []
+        for item in items:
+            item_id = int(item["item_id"])
+            qty = float(item["quantity"])
+
+            cursor.execute(
+                "SELECT ProductRef, UnitPrice FROM SalesInvoiceItems WHERE ID = ? AND InvoiceRef = ?",
+                (item_id, original_invoice_id)
+            )
+            srow = cursor.fetchone()
+            if not srow:
+                raise SalesError("قلم انتخاب‌شده متعلق به این فاکتور فروش نیست.")
+            product_id, unit_price = int(srow[0]), float(srow[1])
+
+            resolved_items.append({
+                "item_id": item_id,
+                "product_id": product_id,
+                "unit_price": unit_price,
+                "quantity": qty,
+                "has_serial": bool(item.get("has_serial")),
+                "serial_ids": item.get("serial_ids") or [],
+                "product_name": item.get("product_name", ""),
+            })
+
+        total_amount = sum(r["quantity"] * r["unit_price"] for r in resolved_items)
+        tax_amount = float(tax_amount or 0)
+        payable = total_amount + tax_amount
+
+        cursor.execute("SELECT ISNULL(MAX(InvoiceNumber), 2999) + 1 AS NextNum FROM SalesReturnInvoices")
+        invoice_number = int(cursor.fetchone()[0])
+
+        cursor.execute(
+            """INSERT INTO SalesReturnInvoices
+               (InvoiceNumber, PersonRef, OriginalSalesInvoiceRef, ShamsiDate,
+                TotalAmount, TaxAmount, PayableAmount, Description, UserRef)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (invoice_number, customer_id, original_invoice_id, shamsi_date,
+             total_amount, tax_amount, payable, description or "", user_id)
+        )
+        cursor.execute("SELECT @@IDENTITY AS id")
+        return_invoice_id = int(cursor.fetchone()[0])
+
+        total_cost_amount = 0.0
+
+        for r in resolved_items:
+            item_id = r["item_id"]
+            product_id = r["product_id"]
+            qty = r["quantity"]
+            price = r["unit_price"]
+            total_price = qty * price
+            cost_amount = 0.0
+
+            non_serial_consumed = []   # (sales_invoice_item_layer_id, purchase_layer_id, take, unit_price)
+            serial_consumed = []       # (serial_id, purchase_layer_id, layer_price)
+
+            if r["has_serial"]:
+                for serial_id in r["serial_ids"]:
+                    cursor.execute(
+                        "SELECT Status, SoldInInvoiceItemRef, PurchaseLayerRef FROM ProductSerials WHERE ID = ?",
+                        (serial_id,)
+                    )
+                    ssrow = cursor.fetchone()
+                    if not ssrow:
+                        raise SalesError("یکی از سریال/IMEی‌های انتخاب‌شده یافت نشد.")
+                    status, sold_ref, layer_ref = ssrow[0], ssrow[1], ssrow[2]
+                    if status != "Sold" or sold_ref is None or int(sold_ref) != item_id:
+                        raise SalesError(
+                            "یکی از سریال/IMEی‌های انتخاب‌شده متعلق به این قلم فروش نیست یا قبلاً برگشت داده شده است."
+                        )
+                    cursor.execute(
+                        "SELECT UnitPrice FROM ProductPurchaseLayers WHERE ID = ?", (layer_ref,)
+                    )
+                    lrow = cursor.fetchone()
+                    layer_price = float(lrow[0]) if lrow and lrow[0] is not None else price
+                    serial_consumed.append((serial_id, int(layer_ref), layer_price))
+                    cost_amount += layer_price
+            else:
+                returnable = _get_sales_invoice_item_returnable(cursor, item_id)
+                remaining_needed = qty
+                for rec in returnable:
+                    if remaining_needed <= 0:
+                        break
+                    avail = rec["returnable_quantity"]
+                    if avail <= 0:
+                        continue
+                    take = min(avail, remaining_needed)
+                    non_serial_consumed.append((
+                        rec["sales_invoice_item_layer_id"], rec["purchase_layer_id"],
+                        take, rec["unit_price"]
+                    ))
+                    cost_amount += take * rec["unit_price"]
+                    remaining_needed -= take
+
+                if remaining_needed > 0:
+                    raise SalesError(
+                        f"«{r['product_name'] or 'این کالا'}» بیش از مقدار قابل‌برگشت این فاکتور فروش است."
+                    )
+
+            total_cost_amount += cost_amount
+
+            cursor.execute(
+                """INSERT INTO SalesReturnInvoiceItems
+                   (InvoiceRef, SalesInvoiceItemRef, ProductRef, Quantity, UnitPrice,
+                    TotalPrice, CostAmount, Description)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (return_invoice_id, item_id, product_id, qty, price, total_price,
+                 cost_amount, r.get("description", ""))
+            )
+            cursor.execute("SELECT @@IDENTITY AS id")
+            return_item_id = int(cursor.fetchone()[0])
+
+            for layer_ref_id, purchase_layer_id, take, layer_unit_price in non_serial_consumed:
+                cursor.execute(
+                    """INSERT INTO SalesReturnInvoiceItemLayers
+                       (SalesReturnInvoiceItemRef, SalesInvoiceItemLayerRef, PurchaseLayerRef, Quantity, UnitPrice)
+                       VALUES (?,?,?,?,?)""",
+                    (return_item_id, layer_ref_id, purchase_layer_id, take, layer_unit_price)
+                )
+                cursor.execute(
+                    "UPDATE ProductPurchaseLayers SET RemainingQuantity = RemainingQuantity + ? WHERE ID = ?",
+                    (take, purchase_layer_id)
+                )
+
+            for serial_id, purchase_layer_id, _layer_price in serial_consumed:
+                cursor.execute(
+                    "UPDATE ProductSerials SET Status = N'InStock' WHERE ID = ?",
+                    (serial_id,)
+                )
+                cursor.execute(
+                    "UPDATE ProductPurchaseLayers SET RemainingQuantity = RemainingQuantity + 1 WHERE ID = ?",
+                    (purchase_layer_id,)
+                )
+
+            # --- بروزرسانی موجودی و کاردکس ---
+            cursor.execute(
+                "UPDATE Products SET CurrentStock = CurrentStock + ?, UpdatedAt = GETDATE() WHERE ID = ?",
+                (qty, product_id)
+            )
+            cursor.execute("SELECT CurrentStock FROM Products WHERE ID = ?", (product_id,))
+            balance = cursor.fetchone()[0]
+
+            cursor.execute(
+                """INSERT INTO ProductCardex
+                   (ProductRef, ShamsiDate, MovementType, RefTable, RefID,
+                    InQuantity, OutQuantity, UnitPrice, BalanceQuantity, Description, UserRef)
+                   VALUES (?,?,N'SellReturn',N'SalesReturnInvoices',?,?,0,?,?,?,?)""",
+                (product_id, shamsi_date, return_invoice_id, qty, price, balance,
+                 f"فاکتور برگشت فروش شماره {invoice_number} (فاکتور فروش اصلی: {original_invoice_number})",
+                 user_id)
+            )
+
+        # --- ثبت سند حسابداری دوطرفه (Journal Entry) در همان Transaction اتمیک برگشت ---
+        # عمداً از همان Cursor/Connection فاکتور برگشت استفاده می‌شود (همان
+        # الگوی create_sales_invoice و create_purchase_return_invoice) تا
+        # فاکتور برگشت و سند حسابداری آن یک واحد اتمیک باشند.
+        journal_lines = _build_sales_return_journal_lines(
+            net_amount=total_amount, tax_amount=tax_amount, total_cost_amount=total_cost_amount
+        )
+        if journal_lines:
+            _post_journal_entry_on_cursor(
+                cursor,
+                shamsi_date=shamsi_date,
+                description=f"فاکتور برگشت فروش شماره {invoice_number}",
+                lines=journal_lines,
+                user_id=user_id,
+                source_table="SalesReturnInvoices",
+                source_id=return_invoice_id,
+            )
+
+        conn.commit()
+        create_audit_entry(user_id, "Create", "SalesReturnInvoices", return_invoice_id,
+                            f"Sales return invoice {invoice_number}")
+        return return_invoice_id, invoice_number
 
     except Exception:
         conn.rollback()
