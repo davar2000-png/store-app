@@ -130,3 +130,49 @@ Push کند (دقیقاً همان روشی که طبق یادداشت Phase 14.
   بدهکار/بستانکار ساده‌تر لازم دارد (موجودی در برابر پرداختنی)، نه دو
   زوج مثل فروش. این را حدس نزن — اگر ابهامی در جهت مالیات خرید (بدهکار
   یا بستانکار) دیدی، طبق قانون Brief متوقف کن و گزارش بده.
+
+---
+
+## Phase 16B — Web Backend Skeleton (Handoff Update)
+
+**Base commit:** `2a73b9a` (Phase 15.6.5 — Sales Return Core)
+**Code commit:** `3b9fccd` — `feat(web): add FastAPI chrome test skeleton`
+**Branch:** `phase/14-workflow-audit`
+
+فایل‌های اضافه‌شده (append-only، هیچ فایل موجودی تغییر نکرد):
+```text
+web/__init__.py
+web/app.py
+web/templates/base.html
+web/templates/home.html
+web/static/style.css
+requirements-web.txt
+tests/test_web_skeleton.py
+```
+
+## TESTS
+`python -m pytest tests/ -q` → **217 passed** (۲۰۷ قبل از این فاز + ۱۰ جدید
+Web Skeleton، هیچ‌کدام از تست‌های قبلی تغییر نکردند).
+
+سرور علاوه بر TestClient با `uvicorn` واقعی روی `127.0.0.1:8000` اجرا و با
+`curl` تست شد (`GET /` → 200, `GET /health` → 200, `GET /static/style.css`
+→ 200, `GET /nonexistent-route` → 404). **این محیط sandbox درایور ODBC/SQL
+Server واقعی ندارد**، پس `/health` صادقانه `not_connected` گزارش می‌دهد —
+این رفتار مورد انتظار است، نه یک باگ.
+
+**تأیید Chrome واقعی هنوز انجام نشده است.** این با HTTP smoke test فرق
+دارد و نباید به‌جای آن جا زده شود.
+
+## PUSH STATUS
+این commit روی `phase/14-workflow-audit` (بر پایه `2a73b9a`) محلی ساخته شد؛
+وضعیت Push دقیق در گزارش نهایی همین Session ثبت می‌شود.
+
+## NEXT PHASE — پیشنهاد برای Account/Session بعدی (16C)
+Auth Extraction + Session Login:
+- ابتدا `services/auth_service.py` را از منطق موجود در
+  `ui/login_window.py` استخراج کن (که مستقیماً `database.db.Database` و
+  `utils.security.verify_password` را مصرف می‌کند) — این استخراج باید
+  additive باشد و رفتار Desktop را عوض نکند.
+- سپس یک session-based login برای وب روی همان `services/auth_service.py`
+  بساز، نه یک پیاده‌سازی موازی.
+- طبق قانون Brief، **این فاز فقط بعد از تأیید صریح کاربر شروع شود.**

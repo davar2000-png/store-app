@@ -270,3 +270,45 @@ Power Failure Protection status:
 - Draft Save: Verified
 - Draft Restore: Verified
 - UI AutoSave: Verified
+
+## Phase 16B — Web Backend Skeleton
+
+**Base commit:** `2a73b9a` (Phase 15.6.5 — Sales Return Core)
+**Code commit:** `3b9fccd` — `feat(web): add FastAPI chrome test skeleton`
+
+هدف: افزودن یک اسکلت واقعی FastAPI + Jinja2 برای اجرای StoreApp در مرورگر،
+بدون بازنویسی هیچ business logic ای در `services/`.
+
+**فایل‌های اضافه‌شده (فقط این‌ها):**
+```text
+web/__init__.py
+web/app.py
+web/templates/base.html
+web/templates/home.html
+web/static/style.css
+requirements-web.txt
+tests/test_web_skeleton.py
+```
+
+**نسخه‌ها:** `fastapi==0.141.1`, `uvicorn==0.52.4`, `jinja2==3.1.6`
+(`httpx` عمداً اضافه نشد — فقط برای TestClient تست‌ها لازم است، نه Runtime وب.)
+
+**Endpointها:**
+- `GET /` → HTML واقعی، RTL/فارسی، از طریق Jinja2 template
+- `GET /health` → گزارش واقعی وضعیت دیتابیس (بدون Fake کردن اتصال؛ در نبود
+  ODBC/SQL Server، `not_connected` همراه با خطای واقعی گزارش می‌شود)
+- `GET /static/style.css` → فایل استاتیک
+
+**تست:**
+- `tests/test_web_skeleton.py` → 10 passed
+- Full suite → 217 passed (۲۰۷ قبلی + ۱۰ جدید)
+- علاوه بر TestClient، سرور با `uvicorn` واقعاً روی `127.0.0.1:8000` اجرا و
+  با `curl` بررسی شد (HTTP smoke test واقعی).
+
+**عمداً در این فاز انجام نشد:**
+- تست با مرورگر Chrome واقعی — **هنوز تأیید نشده است.**
+- هیچ Auth/Session ای پیاده‌سازی نشد (برای Phase 16C).
+- هیچ migration، تغییر schema، یا تغییر در `services/`/`database/`/`ui/`.
+
+**فاز بعدی:** 16C — Auth Extraction + Session Login — شروع نشده، منوط به
+تأیید صریح کاربر.

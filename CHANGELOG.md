@@ -22,3 +22,29 @@
 ### Known Issues
 - پاکسازی کامل Git History هنوز انجام نشده
 - AutoSave/Draft Recovery هنوز به فرم‌های واقعی وصل نشده
+
+## Phase 16B — Web Backend Skeleton
+
+### Added
+- `web/app.py`: اپلیکیشن FastAPI با `GET /`, `GET /health`,
+  static mount در `/static`
+- `web/templates/base.html`, `web/templates/home.html`: قالب Jinja2،
+  RTL/فارسی
+- `web/static/style.css`: استایل حداقلی، بدون framework
+- `requirements-web.txt`: `fastapi==0.141.1`, `uvicorn==0.52.4`,
+  `jinja2==3.1.6`
+- `tests/test_web_skeleton.py`: ۱۰ تست جدید (home 200/HTML/RTL/title,
+  health 200/status/database field, static css, 404)
+
+### Verified
+- FastAPI TestClient: 10/10 passed
+- Full regression suite: 217 passed (۲۰۷ قبلی + ۱۰ جدید)
+- اجرای واقعی `uvicorn` روی `127.0.0.1:8000` + تست با `curl`
+  (HTTP smoke test واقعی، نه فقط TestClient)
+
+### Not Verified
+- تست با مرورگر Chrome واقعی — هنوز انجام نشده
+
+### Unchanged
+- `ui/`, `services/`, `database/`, `utils/`, `main.py`, `config.py`,
+  `requirements.txt`, هیچ migration ای

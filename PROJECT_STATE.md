@@ -44,3 +44,41 @@ Foundation Only — جداول `Sessions`/`Drafts` و `SessionService`/`DraftSer
 
 ## Source Structure
 از این فاز به بعد، کد واقعی مستقیماً در ریشه Repository است (`ui/`, `services/`, `database/`, `utils/`)؛ ZIPهای قدیمی فقط در `archive/` به‌عنوان بایگانی تاریخی نگهداری می‌شوند.
+
+## Update — Phase 16B (Web Backend Skeleton)
+
+> این بخش additive است و بخش‌های بالا (مربوط به Phase 12) را جایگزین نمی‌کند؛
+> صرفاً وضعیت فعلی و اضافه‌شده روی همان مبنا را ثبت می‌کند.
+
+**Branch:** `phase/14-workflow-audit`
+**Base commit قبل از Phase 16B:** `2a73b9a` (Phase 15.6.5 — Sales Return Core)
+**Code commit این فاز:** `3b9fccd` — `feat(web): add FastAPI chrome test skeleton`
+
+هدف Phase 16 مجموعه‌ای از فازها برای افزودن یک Web UI موازی (Chrome) روی
+همان Business Logic دسکتاپ موجود است، بدون بازنویسی `services/`. Phase 16B
+فقط اسکلت HTTP را اضافه کرد:
+
+```text
+web/__init__.py
+web/app.py
+web/templates/base.html
+web/templates/home.html
+web/static/style.css
+requirements-web.txt
+tests/test_web_skeleton.py
+```
+
+Endpointهای فعلی: `GET /`, `GET /health`, `GET /static/style.css`.
+`/health` وضعیت واقعی اتصال دیتابیس را گزارش می‌دهد (بدون Fake کردن).
+
+**تست شده با:** FastAPI TestClient + یک اجرای واقعی `uvicorn` روی
+`127.0.0.1:8000` همراه با درخواست HTTP واقعی (curl).
+**تست نشده با:** مرورگر Chrome واقعی — این تأیید هنوز انجام نشده است.
+
+`ui/`, `services/`, `database/`, `utils/`, `main.py`, `config.py`,
+`requirements.txt` و migrationها در این فاز **بدون تغییر** ماندند.
+
+نتیجه تست: `217 passed` (۲۰۷ تست قبلی + ۱۰ تست جدید Web Skeleton).
+
+**فاز بعدی:** 16C — Auth Extraction + Session Login — **شروع نشده**، منتظر
+تأیید صریح کاربر.
