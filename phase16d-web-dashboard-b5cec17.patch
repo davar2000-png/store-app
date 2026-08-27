@@ -1,0 +1,529 @@
+From b5cec179605a36da002d664d78ac6098bdc46474 Mon Sep 17 00:00:00 2001
+From: StoreApp AI Agent <ai-agent@storeapp.local>
+Date: Thu, 27 Aug 2026 12:44:53 +0000
+Subject: [PATCH] feat(phase16d): add auth gate, HTML login page and read-only
+ dashboard
+
+- web/app.py: GET / rewritten as auth gate (redirects to /login or
+  /dashboard based on web session validity via web_session_service
+  .validate_session, unchanged from Phase16C); GET /login (HTML form,
+  posts to existing POST /login via JS) and GET /dashboard (read-only,
+  session-protected) added. POST /login, POST /logout, GET /health
+  untouched.
+- services/auth_service.py: add get_user_by_id (read-only SELECT from
+  Users by ID, same sensitive-field filtering as authenticate_user).
+- tests/_fake_database.py: add fetch_one support for
+  'FROM USERS WHERE ID' lookups; existing behavior unchanged.
+- web/templates/login.html, web/templates/dashboard.html: new templates.
+- web/static/style.css: minimal styling for login form and dashboard.
+- tests/test_web_dashboard.py: 3 new tests (login page renders, dashboard
+  redirects without session, dashboard shows username with valid session).
+- PHASE_REGISTRY.md: document Phase16D scope and results.
+
+No changes to Legacy Accounting Database or its tables (Transaction,
+DetailAccounts, Factors, Cashs, CashBox, ChequeRecs, ChequePays). No new
+financial tables designed. Migration 015_web_sessions.sql left as-is,
+not executed against a real SQL Server. Not merged to main.
+
+Full suite: 248 passed (245 previous + 3 new).
+---
+ PHASE_REGISTRY.md            | 67 ++++++++++++++++++++++++++
+ services/auth_service.py     | 25 ++++++++++
+ tests/_fake_database.py      |  7 +++
+ tests/test_web_dashboard.py  | 62 ++++++++++++++++++++++++
+ web/app.py                   | 92 ++++++++++++++++++++++++++++++++++--
+ web/static/style.css         | 49 +++++++++++++++++++
+ web/templates/dashboard.html | 32 +++++++++++++
+ web/templates/login.html     | 58 +++++++++++++++++++++++
+ 8 files changed, 387 insertions(+), 5 deletions(-)
+ create mode 100644 tests/test_web_dashboard.py
+ create mode 100644 web/templates/dashboard.html
+ create mode 100644 web/templates/login.html
+
+diff --git a/PHASE_REGISTRY.md b/PHASE_REGISTRY.md
+index fde4100..6b12bf3 100644
+--- a/PHASE_REGISTRY.md
++++ b/PHASE_REGISTRY.md
+@@ -389,3 +389,70 @@ web/app.py (POST /login, POST /logout)
+ 
+ **فاز بعدی:** 16D — Web Dashboard — شروع نشده، منوط به تأیید صریح کاربر و
+ تکمیل واقعی و بررسی‌شدهٔ Phase16C.
++
++## Phase 16D — Web Dashboard
++
++**Base commit:** `32bd263` (Phase 16C — Auth Extraction + Session Login)
++**Branch:** `phase/16d-web-dashboard-real`
++
++هدف: افزودن Auth Gate برای صفحه اصلی، یک صفحه HTML واقعی برای ورود، و یک
++Dashboard خواندنی — همه با استفاده از همان Session وب که در Phase16C
++ساخته شده. هیچ منطق Auth/Session جدیدی نوشته نشد؛ فقط
++`web_session_service.validate_session` (Phase16C) فراخوانی می‌شود.
++
++**خارج از محدوده این فاز (طبق تصمیم صریح پروژه):**
++- هرگونه تغییر در Legacy Accounting Database یا جداول آن
++  (`Transaction`, `DetailAccounts`, `Factors`, `Cashs`, `CashBox`,
++  `ChequeRecs`, `ChequePays`).
++- طراحی جدول مالی جدید.
++- اجرای Migration 015 روی SQL Server واقعی.
++- Merge به `main`.
++
++**فایل‌های اضافه‌شده:**
++```text
++web/templates/login.html
++web/templates/dashboard.html
++tests/test_web_dashboard.py
++```
++
++**فایل‌های تغییریافته:**
++```text
++web/app.py                (GET / بازنویسی شد به Auth Gate که Redirect
++                            می‌کند؛ GET /login و GET /dashboard اضافه شد؛
++                            POST /login، POST /logout، GET /health
++                            دست‌نخورده)
++services/auth_service.py  (افزوده شدن get_user_by_id — فقط SELECT از
++                            Users با ID، همان محدودیت‌های authenticate_user)
++tests/_fake_database.py   (افزوده شدن پشتیبانی fetch_one برای
++                            "FROM USERS WHERE ID"؛ رفتار قبلی دست‌نخورده)
++web/static/style.css      (استایل حداقلی برای فرم Login و Dashboard)
++```
++
++**معماری:**
++```
++GET /            ──▶ Auth Gate ──▶ Redirect به /login یا /dashboard
++GET /login       ──▶ فرم HTML؛ با JS به همان POST /login موجود (Phase16C) وصل می‌شود
++GET /dashboard   ──▶ Auth Gate ──▶ auth_service.get_user_by_id (فقط SELECT از Users)
++        │
++        └──▶ web_session_service.validate_session (Phase16C، بدون تغییر)
++```
++
++- `/dashboard` فقط اطلاعات خودِ کاربر (Username/FullName) را نمایش
++  می‌دهد؛ هیچ داده‌ای از جداول حسابداری Legacy خوانده نمی‌شود.
++- دکمه خروج در Dashboard همان `POST /logout` موجود از Phase16C را
++  فراخوانی می‌کند.
++
++**تست:**
++- `tests/test_web_dashboard.py` → 3 passed
++- Full suite → **248 passed** (245 قبلی + 3 جدید)
++- سرور با `uvicorn` واقعاً روی `127.0.0.1` اجرا و با `curl` بررسی شد:
++  `GET /` بدون Cookie به `/login` هدایت می‌شود؛ `GET /health` صادقانه
++  `not_connected` را گزارش می‌کند (بدون درایور SQL Server واقعی در این
++  sandbox).
++
++**عمداً در این فاز انجام نشد:**
++- Migration 015 اجرا نشد و Merge به `main` انجام نشد (طبق قانون پروژه).
++- هیچ تغییری در Legacy Accounting Database یا جداول آن.
++- هیچ جدول مالی جدیدی طراحی نشد.
++
++**فاز بعدی:** منوط به تأیید صریح کاربر.
+diff --git a/services/auth_service.py b/services/auth_service.py
+index 795adf9..b009a52 100644
+--- a/services/auth_service.py
++++ b/services/auth_service.py
+@@ -63,6 +63,31 @@ def authenticate_user(username: str, password: str):
+     return {k: v for k, v in user.items() if k not in _SENSITIVE_USER_FIELDS}
+ 
+ 
++def get_user_by_id(user_id: int):
++    """
++    اطلاعات یک کاربر را با شناسه (ID) برمی‌گرداند — فقط برای نمایش در
++    صفحات محافظت‌شده وب (Phase 16D)، مثل Dashboard، پس از احراز هویت
++    Session. هیچ رمز عبوری اینجا بررسی نمی‌شود؛ فقط SELECT از جدول
++    موجود Users است.
++
++    خروجی: دیکشنری اطلاعات کاربر (بدون PasswordHash/PasswordSalt) یا
++    None اگر کاربری با این ID یافت نشود یا غیرفعال باشد.
++    """
++    db = Database()
++    try:
++        user = db.fetch_one(
++            "SELECT * FROM Users WHERE ID = ? AND IsActive = 1",
++            (user_id,),
++        )
++    finally:
++        db.close()
++
++    if not user:
++        return None
++
++    return {k: v for k, v in user.items() if k not in _SENSITIVE_USER_FIELDS}
++
++
+ def _record_login(user_id: int) -> None:
+     """زمان آخرین ورود موفق را در ستون موجود Users.LastLogin ثبت می‌کند."""
+     db = Database()
+diff --git a/tests/_fake_database.py b/tests/_fake_database.py
+index 4f8f8da..53d43dc 100644
+--- a/tests/_fake_database.py
++++ b/tests/_fake_database.py
+@@ -214,6 +214,13 @@ class FakeDatabase:
+                     return copy.deepcopy(row)
+             return None
+ 
++        if "FROM USERS WHERE ID" in normalized:
++            user_id = params[0]
++            for row in self.__class__.users:
++                if row["ID"] == user_id and row.get("IsActive", True):
++                    return copy.deepcopy(row)
++            return None
++
+         if "FROM WEBSESSIONS WHERE TOKENHASH" in normalized:
+             token_hash = params[0]
+             for row in self.__class__.web_sessions:
+diff --git a/tests/test_web_dashboard.py b/tests/test_web_dashboard.py
+new file mode 100644
+index 0000000..36c81be
+--- /dev/null
++++ b/tests/test_web_dashboard.py
+@@ -0,0 +1,62 @@
++# -*- coding: utf-8 -*-
++"""
++Phase 16D — تست‌های Auth Gate، صفحه HTML Login و Dashboard خواندنی.
++
++این تست‌ها هیچ منطق Auth/Session جدیدی را دوباره تست نمی‌کنند (آن‌ها در
++tests/test_auth_service.py و tests/test_web_session_service.py پوشش داده
++شده‌اند) — فقط بررسی می‌کنند که `/`، `/login` و `/dashboard` بر اساس همان
++Session موجود (از Phase16C) رفتار درستی داشته باشند.
++"""
++
++from fastapi.testclient import TestClient
++
++import services.auth_service as auth_service
++import services.web_session_service as web_session_service
++from tests._fake_database import FakeDatabase
++from utils.security import hash_password
++from web.app import app
++
++client = TestClient(app)
++
++
++def setup_function():
++    FakeDatabase.reset()
++    auth_service.Database = FakeDatabase
++    web_session_service.Database = FakeDatabase
++    client.cookies.clear()
++
++    password_hash, salt = hash_password("correct-horse")
++    FakeDatabase.users = [
++        {
++            "ID": 1,
++            "Username": "davar",
++            "PasswordHash": password_hash,
++            "PasswordSalt": salt,
++            "FullName": "Davar",
++            "IsAdmin": True,
++            "IsActive": True,
++            "LastLogin": None,
++        }
++    ]
++
++
++def test_login_page_returns_200_html_form():
++    response = client.get("/login")
++    assert response.status_code == 200
++    assert "text/html" in response.headers["content-type"]
++    assert "login-form" in response.text
++
++
++def test_dashboard_without_session_redirects_to_login():
++    response = client.get("/dashboard")
++    assert response.status_code == 200  # TestClient دنبال Redirect می‌رود
++    assert "login-form" in response.text
++
++
++def test_dashboard_with_valid_session_shows_username():
++    client.post("/login", json={"username": "davar", "password": "correct-horse"})
++
++    response = client.get("/dashboard")
++
++    assert response.status_code == 200
++    assert "davar" in response.text
+diff --git a/web/app.py b/web/app.py
+index 7381b3e..c11883f 100644
+--- a/web/app.py
++++ b/web/app.py
+@@ -3,6 +3,7 @@
+ Phase 16B — Web Backend Skeleton
+ Phase 16C — Auth Extraction + Session Login (فقط API؛ بدون HTML Login UI،
+ طبق تصمیم صریح پروژه — فرم HTML به Phase16D موکول شده است)
++Phase 16D — Web Dashboard (Auth Gate + صفحه HTML Login + Dashboard خواندنی)
+ 
+ هدف اصلی این فایل ساخت یک اسکلت وب واقعی (FastAPI + Jinja2) است تا StoreApp
+ بتواند به‌صورت محلی از طریق Chrome باز شود.
+@@ -13,8 +14,20 @@ endpoint جدید (`/login`, `/logout`) اضافه شده که فقط سرویس
+ فراخوانی می‌کنند — هیچ منطق Auth/Session جدیدی مستقیماً در این فایل
+ نوشته نمی‌شود.
+ 
++در Phase16D سه endpoint جدید HTML اضافه شده‌اند: `GET /login` (فرم ورود)،
++`GET /dashboard` (پیشخوان خواندنی، فقط پس از احراز هویت) و بازنویسی
++`GET /` به‌عنوان Auth Gate که بر اساس معتبر بودن Session به یکی از آن دو
++هدایت می‌کند. تمام بررسی اعتبار Session با فراخوانی
++`web_session_service.validate_session` (که در Phase16C ساخته شده) انجام
++می‌شود — هیچ منطق جدید بررسی Session اینجا نوشته نشده است. Dashboard فقط
++اطلاعات خواندنی کاربر (از `auth_service.get_user_by_id`) را نمایش می‌دهد؛
++هیچ داده‌ای از جداول حسابداری Legacy (`Transaction`, `DetailAccounts`,
++`Factors`, `Cashs`, `CashBox`, `ChequeRecs`, `ChequePays`) خوانده یا
++نمایش داده نمی‌شود.
++
+ این ماژول عمداً هیچ اتصال دیتابیس واقعی برقرار نمی‌کند مگر در endpointهایی
+-که صریحاً به دیتابیس نیاز دارند (`/health`, `/login`, `/logout`).
++که صریحاً به دیتابیس نیاز دارند (`/health`, `/login`, `/logout`,
++`/dashboard`).
+ """
+ 
+ import os
+@@ -28,7 +41,7 @@ if str(PROJECT_ROOT) not in sys.path:
+     sys.path.append(str(PROJECT_ROOT))
+ 
+ from fastapi import FastAPI, Response
+-from fastapi.responses import HTMLResponse, JSONResponse
++from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+ from fastapi.staticfiles import StaticFiles
+ from fastapi.templating import Jinja2Templates
+ from pydantic import BaseModel
+@@ -71,12 +84,81 @@ def check_database_status() -> dict:
+         return {"status": "not_connected", "detail": str(exc)}
+ 
+ 
+-@app.get("/", response_class=HTMLResponse)
++def _get_current_user_id(request: Request):
++    """
++    شناسه کاربر جاری را از روی Cookie بررسی می‌کند (Phase 16D — Auth Gate).
++
++    فقط `web_session_service.validate_session` (ساخته‌شده در Phase16C) را
++    فراخوانی می‌کند — هیچ منطق جدید بررسی Session اینجا نوشته نمی‌شود.
++    خروجی: UserRef (int) در صورت معتبر بودن Session، یا None در غیر این
++    صورت (Cookie نبود، Session نامعتبر بود، یا خطای دیتابیس رخ داد).
++    """
++    raw_token = request.cookies.get(SESSION_COOKIE_NAME)
++    if not raw_token:
++        return None
++    try:
++        return web_session_service.validate_session(raw_token)
++    except Exception:  # noqa: BLE001 - همان اصل صادقانه‌ی /health
++        return None
++
++
++@app.get("/")
+ def home(request: Request):
++    """
++    Auth Gate صفحه اصلی (Phase 16D).
++
++    این route دیگر خودش HTML تولید نمی‌کند؛ فقط بر اساس معتبر بودن
++    Session کاربر را به `/dashboard` یا `/login` هدایت می‌کند.
++    """
++    user_id = _get_current_user_id(request)
++    if user_id is None:
++        return RedirectResponse(url="/login", status_code=303)
++    return RedirectResponse(url="/dashboard", status_code=303)
++
++
++@app.get("/login", response_class=HTMLResponse)
++def login_page(request: Request):
++    """
++    صفحه HTML ورود (Phase 16D).
++
++    این endpoint فقط فرم ورود را نمایش می‌دهد؛ خودِ فرم با JavaScript به
++    همان `POST /login` موجود از Phase16C وصل می‌شود — هیچ منطق Auth
++    جدیدی تکرار نشده است. اگر کاربر از قبل Session معتبر داشته باشد،
++    مستقیماً به `/dashboard` هدایت می‌شود.
++    """
++    user_id = _get_current_user_id(request)
++    if user_id is not None:
++        return RedirectResponse(url="/dashboard", status_code=303)
++    return templates.TemplateResponse(
++        request=request,
++        name="login.html",
++        context={"page_title": "ورود — StoreApp"},
++    )
++
++
++@app.get("/dashboard", response_class=HTMLResponse)
++def dashboard_page(request: Request):
++    """
++    پیشخوان خواندنی (Phase 16D).
++
++    فقط برای کاربرانی که Session وب معتبر دارند در دسترس است؛ در غیر
++    این صورت به `/login` هدایت می‌شوند. این صفحه هیچ داده‌ای از جداول
++    حسابداری Legacy نمی‌خواند — فقط اطلاعات خودِ کاربر (از
++    `auth_service.get_user_by_id`) را نمایش می‌دهد.
++    """
++    user_id = _get_current_user_id(request)
++    if user_id is None:
++        return RedirectResponse(url="/login", status_code=303)
++
++    try:
++        user = auth_service.get_user_by_id(user_id)
++    except Exception:  # noqa: BLE001 - همان اصل صادقانه‌ی /health
++        user = None
++
+     return templates.TemplateResponse(
+         request=request,
+-        name="home.html",
+-        context={"page_title": "پیشخوان — StoreApp"},
++        name="dashboard.html",
++        context={"page_title": "پیشخوان — StoreApp", "user": user},
+     )
+ 
+ 
+diff --git a/web/static/style.css b/web/static/style.css
+index a1a363f..dca6803 100644
+--- a/web/static/style.css
++++ b/web/static/style.css
+@@ -58,3 +58,52 @@ body {
+     font-size: 0.85rem;
+     padding: 1.5rem;
+ }
++
++/* Phase 16D - Web Dashboard - login / dashboard styling */
++
++.login-box,
++.dashboard-box {
++    background-color: #ffffff;
++    border: 1px solid #e0e0e0;
++    border-radius: 8px;
++    padding: 1.5rem;
++}
++
++.form-field {
++    margin-bottom: 1rem;
++    display: flex;
++    flex-direction: column;
++}
++
++.form-field label {
++    margin-bottom: 0.35rem;
++    font-size: 0.9rem;
++    color: #444;
++}
++
++.form-field input {
++    padding: 0.5rem;
++    border: 1px solid #ccc;
++    border-radius: 4px;
++    font-size: 1rem;
++}
++
++.login-box button,
++.dashboard-box button {
++    background-color: #1f3a5f;
++    color: #ffffff;
++    border: none;
++    border-radius: 4px;
++    padding: 0.6rem 1.2rem;
++    font-size: 1rem;
++    cursor: pointer;
++}
++
++.login-error {
++    color: #b3261e;
++    margin-top: 1rem;
++}
++
++.dashboard-username {
++    color: #555;
++}
+diff --git a/web/templates/dashboard.html b/web/templates/dashboard.html
+new file mode 100644
+index 0000000..9539dc6
+--- /dev/null
++++ b/web/templates/dashboard.html
+@@ -0,0 +1,32 @@
++{% extends "base.html" %}
++
++{% block content %}
++    <section class="dashboard-box">
++        {% if user %}
++            <h2>خوش آمدید، {{ user.FullName or user.Username }}</h2>
++            <p class="dashboard-username">نام کاربری: {{ user.Username }}</p>
++        {% else %}
++            <h2>پیشخوان</h2>
++        {% endif %}
++
++        <p>
++            این نسخه‌ی Dashboard فقط خواندنی است. هیچ‌کدام از فرآیندهای واقعی
++            فروش، خرید یا حسابداری هنوز از طریق مرورگر در دسترس نیستند.
++        </p>
++        <p>
++            برای بررسی وضعیت سرور و اتصال دیتابیس به آدرس
++            <code>/health</code> مراجعه کنید.
++        </p>
++
++        <button id="logout-button">خروج</button>
++    </section>
++
++    <script>
++        // فقط همان POST /logout موجود از Phase16C را فراخوانی می‌کند — هیچ
++        // منطق جدید خروج اینجا نوشته نشده است.
++        document.getElementById("logout-button").addEventListener("click", async function () {
++            await fetch("/logout", { method: "POST" });
++            window.location.href = "/login";
++        });
++    </script>
++{% endblock %}
+diff --git a/web/templates/login.html b/web/templates/login.html
+new file mode 100644
+index 0000000..3706830
+--- /dev/null
++++ b/web/templates/login.html
+@@ -0,0 +1,58 @@
++{% extends "base.html" %}
++
++{% block content %}
++    <section class="login-box">
++        <h2>ورود به سیستم</h2>
++        <form id="login-form">
++            <div class="form-field">
++                <label for="username">نام کاربری</label>
++                <input type="text" id="username" name="username" autocomplete="username" required>
++            </div>
++            <div class="form-field">
++                <label for="password">رمز عبور</label>
++                <input type="password" id="password" name="password" autocomplete="current-password" required>
++            </div>
++            <button type="submit">ورود</button>
++            <p id="login-error" class="login-error" hidden></p>
++        </form>
++    </section>
++
++    <script>
++        // این فرم هیچ منطق Auth جدیدی ندارد؛ فقط همان POST /login موجود از
++        // Phase16C (services/auth_service.py + services/web_session_service.py)
++        // را با JSON فراخوانی می‌کند و در صورت موفقیت به /dashboard می‌رود.
++        const form = document.getElementById("login-form");
++        const errorBox = document.getElementById("login-error");
++
++        form.addEventListener("submit", async function (event) {
++            event.preventDefault();
++            errorBox.hidden = true;
++
++            const username = document.getElementById("username").value;
++            const password = document.getElementById("password").value;
++
++            const response = await fetch("/login", {
++                method: "POST",
++                headers: { "Content-Type": "application/json" },
++                body: JSON.stringify({ username: username, password: password }),
++            });
++
++            if (response.ok) {
++                window.location.href = "/dashboard";
++                return;
++            }
++
++            let detail = "ورود ناموفق بود.";
++            try {
++                const data = await response.json();
++                if (data && data.detail) {
++                    detail = data.detail;
++                }
++            } catch (err) {
++                // پاسخ JSON نبود؛ پیام پیش‌فرض نمایش داده می‌شود.
++            }
++            errorBox.textContent = detail;
++            errorBox.hidden = false;
++        });
++    </script>
++{% endblock %}
+-- 
+2.43.0
+
