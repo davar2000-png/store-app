@@ -15,6 +15,15 @@ class FakeDatabase:
     #: می‌کند تا رفتار create_audit_entry در برابر شکست DB تست شود.
     fail_audit_insert = False
 
+    #: (Phase 16C) داده‌های ساختگی Users — تست‌ها این لیست را مستقیماً پر
+    #: می‌کنند؛ این FakeDatabase هیچ کاربری را از پیش Seed نمی‌کند.
+    users = []
+
+    #: (Phase 16C) Session های وب — کاملاً مستقل از self.sessions (که
+    #: مربوط به بازیابی بعد از قطع برق در دسکتاپ است).
+    web_sessions = []
+    _next_web_session_id = 1
+
     def __init__(self):
         self._last_insert_id = None
 
@@ -27,6 +36,9 @@ class FakeDatabase:
         cls._next_draft_id = 1
         cls._next_audit_id = 1
         cls.fail_audit_insert = False
+        cls.users = []
+        cls.web_sessions = []
+        cls._next_web_session_id = 1
 
     def execute(self, sql, params=()):
         normalized = " ".join(sql.split()).upper()
@@ -148,6 +160,45 @@ class FakeDatabase:
             self._last_insert_id = row["ID"]
             return self._last_insert_id
 
+        if normalized.startswith("UPDATE USERS SET LASTLOGIN"):
+            user_id = params[0]
+            for row in self.__class__.users:
+                if row["ID"] == user_id:
+                    row["LastLogin"] = "NOW"
+            return
+
+        if normalized.startswith("INSERT INTO WEBSESSIONS"):
+            token_hash, user_id, expires_at, user_agent, ip_address = params
+            row = {
+                "ID": self.__class__._next_web_session_id,
+                "TokenHash": token_hash,
+                "UserRef": user_id,
+                "CreatedAt": "NOW",
+                "ExpiresAt": expires_at,
+                "LastActivity": "NOW",
+                "IsRevoked": False,
+                "UserAgent": user_agent,
+                "IPAddress": ip_address,
+            }
+            self.__class__.web_sessions.append(row)
+            self.__class__._next_web_session_id += 1
+            self._last_insert_id = row["ID"]
+            return self._last_insert_id
+
+        if normalized.startswith("UPDATE WEBSESSIONS SET LASTACTIVITY"):
+            session_id = params[0]
+            for row in self.__class__.web_sessions:
+                if row["ID"] == session_id:
+                    row["LastActivity"] = "NOW"
+            return
+
+        if normalized.startswith("UPDATE WEBSESSIONS SET ISREVOKED"):
+            token_hash = params[0]
+            for row in self.__class__.web_sessions:
+                if row["TokenHash"] == token_hash:
+                    row["IsRevoked"] = True
+            return
+
         raise AssertionError(f"Unsupported SQL: {sql}")
 
     def fetch_one(self, sql, params=()):
@@ -155,6 +206,20 @@ class FakeDatabase:
 
         if "SCOPE_IDENTITY()" in normalized:
             return {"ID": self._last_insert_id}
+
+        if "FROM USERS WHERE USERNAME" in normalized:
+            username = params[0]
+            for row in self.__class__.users:
+                if row["Username"] == username and row.get("IsActive", True):
+                    return copy.deepcopy(row)
+            return None
+
+        if "FROM WEBSESSIONS WHERE TOKENHASH" in normalized:
+            token_hash = params[0]
+            for row in self.__class__.web_sessions:
+                if row["TokenHash"] == token_hash:
+                    return copy.deepcopy(row)
+            return None
 
         raise AssertionError(f"Unsupported fetch_one SQL: {sql}")
 
