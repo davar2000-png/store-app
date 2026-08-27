@@ -21,6 +21,7 @@ import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db import Database
+from services.audit_service import create_audit_entry
 
 
 def save_draft(user_id: int, form_type: str, data: dict,
@@ -84,21 +85,23 @@ def get_active_drafts(user_id: int, form_type: str = None):
     return result
 
 
-def mark_recovered(draft_id: int) -> None:
+def mark_recovered(draft_id: int, user_id: int = None) -> None:
     """وقتی کاربر انتخاب می‌کند Draft را بازیابی کند."""
     db = Database()
     db.execute("UPDATE Drafts SET Status = 'RECOVERED' WHERE ID = ?", (draft_id,))
     db.close()
+    create_audit_entry(user_id, "Update", "Drafts", draft_id, "Draft recovered")
 
 
-def discard_draft(draft_id: int) -> None:
+def discard_draft(draft_id: int, user_id: int = None) -> None:
     """وقتی کاربر انتخاب می‌کند Draft را دور بریزد."""
     db = Database()
     db.execute("UPDATE Drafts SET Status = 'DISCARDED' WHERE ID = ?", (draft_id,))
     db.close()
+    create_audit_entry(user_id, "Update", "Drafts", draft_id, "Draft discarded")
 
 
-def complete_draft(draft_id: int) -> None:
+def complete_draft(draft_id: int, user_id: int = None) -> None:
     """
     باید فقط بعد از ثبت نهایی موفق (Posted) عملیات اصلی فراخوانی شود
     — یعنی Draft دیگر لازم نیست چون سند نهایی حسابداری ساخته شده.
@@ -107,3 +110,4 @@ def complete_draft(draft_id: int) -> None:
     db = Database()
     db.execute("UPDATE Drafts SET Status = 'COMPLETED' WHERE ID = ?", (draft_id,))
     db.close()
+    create_audit_entry(user_id, "Update", "Drafts", draft_id, "Draft completed")

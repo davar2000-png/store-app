@@ -18,6 +18,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db import Database
 from utils.security import hash_password
+from services.audit_service import create_audit_entry
 
 
 # =========================================================
@@ -39,6 +40,7 @@ MODULE_PERMISSIONS = [
     ("ModuleImport",        "📥 Import از ربات"),
     ("ModuleBackup",        "🗄️ پشتیبان‌گیری"),
     ("ModuleAssistant",     "🤖 دستیار هوش مصنوعی"),
+    ("audit.view",          "📜 مشاهده گزارش رویدادها (Audit)"),
 ]
 
 
@@ -57,11 +59,13 @@ def set_setting(key: str, value: str, description: str = None):
     existing = db.fetch_one("SELECT ID FROM Settings WHERE SettingKey = ?", (key,))
     if existing:
         db.execute("UPDATE Settings SET SettingValue = ? WHERE SettingKey = ?", (value, key))
+        create_audit_entry(None, "Update", "Settings", existing["ID"], f"Updated setting: {key}")
     else:
-        db.execute(
+        new_id = db.execute(
             "INSERT INTO Settings (SettingKey, SettingValue, Description) VALUES (?, ?, ?)",
             (key, value, description)
         )
+        create_audit_entry(None, "Create", "Settings", new_id, f"Created setting: {key}")
     db.close()
 
 
@@ -100,7 +104,7 @@ def username_exists(username: str, exclude_user_id: int = None) -> bool:
     return row is not None
 
 
-def create_user(username: str, full_name: str, password: str, is_admin: bool) -> int:
+def create_user(username: str, full_name: str, password: str, is_admin: bool, actor_user_id: int = None) -> int:
     if username_exists(username):
         raise ValueError("این نام کاربری قبلاً استفاده شده است.")
     hashed, salt = hash_password(password)
@@ -111,10 +115,19 @@ def create_user(username: str, full_name: str, password: str, is_admin: bool) ->
         (username, hashed, salt, full_name, 1 if is_admin else 0)
     )
     db.close()
+
+    create_audit_entry(
+        actor_user_id,
+        "Create",
+        "Users",
+        new_id,
+        f"Created user: {username}"
+    )
+
     return new_id
 
 
-def update_user(user_id: int, full_name: str, is_admin: bool, is_active: bool):
+def update_user(user_id: int, full_name: str, is_admin: bool, is_active: bool, actor_user_id: int = None):
     db = Database()
     db.execute(
         "UPDATE Users SET FullName = ?, IsAdmin = ?, IsActive = ? WHERE ID = ?",
@@ -123,7 +136,8 @@ def update_user(user_id: int, full_name: str, is_admin: bool, is_active: bool):
     db.close()
 
 
-def reset_user_password(user_id: int, new_password: str):
+    create_audit_entry(actor_user_id, "Update", "Users", user_id, f"Updated user: {full_name}")
+def reset_user_password(user_id: int, new_password: str, actor_user_id: int = None):
     hashed, salt = hash_password(new_password)
     db = Database()
     db.execute(
@@ -131,6 +145,7 @@ def reset_user_password(user_id: int, new_password: str):
         (hashed, salt, user_id)
     )
     db.close()
+    create_audit_entry(actor_user_id, "Update", "Users", user_id, "User password changed")
 
 
 # =========================================================
@@ -146,7 +161,7 @@ def get_user_permissions(user_id: int) -> dict:
     return {r["PermissionKey"]: bool(r["IsAllowed"]) for r in rows}
 
 
-def save_user_permissions(user_id: int, permissions: dict):
+def save_user_permissions(user_id: int, permissions: dict, actor_user_id: int = None):
     """permissions: {PermissionKey: True/False} — برای همه کلیدهای MODULE_PERMISSIONS ذخیره می‌شود."""
     db = Database()
     for key, allowed in permissions.items():
@@ -165,6 +180,7 @@ def save_user_permissions(user_id: int, permissions: dict):
                 (user_id, key, 1 if allowed else 0)
             )
     db.close()
+    create_audit_entry(actor_user_id, "Update", "UserPermissions", user_id, f"Updated permissions for user {user_id}")
 
 
 def is_module_allowed(user: dict, module_key: str) -> bool:

@@ -10,11 +10,110 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db import Database
+from services.audit_service import create_audit_entry
+from services.accounting_service import _post_journal_entry_on_cursor
+
+# --- Chart of Accounts codes استفاده‌شده برای سند حسابداری خرید (Phase 15.3) ---
+# طبق تصمیم صریح Option C: FIFO و ProductPurchaseLayers.UnitPrice دست‌نخورده
+# می‌مانند (همچنان قیمت خام واحد را نگه می‌دارند)؛ این کدها فقط برای سند
+# حسابداری دوطرفه استفاده می‌شوند، نه برای تغییر منطق موجودی/FIFO.
+# 1200/2000 در 009_accounting_core.sql Seed شده‌اند؛ 1400/5100 در
+# 011_purchase_accounting.sql (Phase 15.3) اضافه شدند.
+ACCOUNT_INVENTORY = "1200"          # موجودی کالا
+ACCOUNT_PURCHASE_TAX = "1400"       # مالیات خرید / مالیات قابل کسر
+ACCOUNT_PURCHASE_DISCOUNT = "5100"  # تخفیف خرید (Contra-Purchase)
+ACCOUNT_ACCOUNTS_PAYABLE = "2000"   # حساب‌های پرداختنی (بستانکاران/تأمین‌کنندگان)
+
+# مقادیر کوچک‌تر از این، ناشی از خطای گرد شدن اعشار در نظر گرفته می‌شوند و
+# ردیف حسابداری جداگانه‌ای برایشان ساخته نمی‌شود (نه صفر واقعی اقتصادی).
+_ZERO_TOLERANCE = 1e-9
 
 
 class InventoryError(Exception):
     """خطای قابل‌فهم برای نمایش به کاربر (نه خطای فنی دیتابیس)"""
     pass
+
+
+def _build_purchase_journal_lines(inventory_amount: float, tax_amount: float,
+                                   discount_total: float, payable: float) -> list:
+    """
+    ردیف‌های سند حسابداری دوطرفه یک فاکتور خرید را می‌سازد (بدون لمس
+    دیتابیس؛ خالص و قابل تست مستقل) — طبق تصمیم صریح Option C:
+
+        بدهکار   1200 موجودی کالا       = SUM(quantity × raw_unit_price)
+        بدهکار   1400 مالیات خرید       = TaxAmount
+        بستانکار 5100 تخفیف خرید        = SUM(تخفیف قلمی) + تخفیف سربرگ
+        بستانکار 2000 حساب‌های پرداختنی = PayableAmount
+
+    inventory_amount عمداً SUM(quantity × raw_unit_price) است (نه خالص
+    پس از تخفیف) چون ProductPurchaseLayers.UnitPrice قیمت خام را نگه
+    می‌دارد؛ اثر تخفیف به‌طور جداگانه در ردیف 5100 ثبت می‌شود تا این سند
+    با خودِ لایه‌های FIFO (که دست‌نخورده می‌مانند) سازگار بماند.
+
+    ردیف‌هایی که مبلغشان صفر است اصلاً ساخته نمی‌شوند؛ یک سند با ردیف صفر
+    یا یک سند کاملاً خالی هرگز نباید Post شود.
+    """
+    lines = []
+
+    if abs(inventory_amount) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_INVENTORY,
+            "debit": inventory_amount,
+            "description": "افزایش موجودی کالا بابت خرید",
+        })
+    if abs(tax_amount) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_PURCHASE_TAX,
+            "debit": tax_amount,
+            "description": "مالیات قابل کسر فاکتور خرید",
+        })
+    if abs(discount_total) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_PURCHASE_DISCOUNT,
+            "credit": discount_total,
+            "description": "تخفیف فاکتور خرید",
+        })
+    if abs(payable) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_ACCOUNTS_PAYABLE,
+            "credit": payable,
+            "description": "بدهی به تأمین‌کننده بابت فاکتور خرید",
+        })
+
+    return lines
+
+
+def _build_purchase_return_journal_lines(total_amount: float) -> list:
+    """
+    ردیف‌های سند حسابداری دوطرفه یک فاکتور برگشت از خرید را می‌سازد (بدون
+    لمس دیتابیس؛ خالص و قابل تست مستقل) — طبق طراحی تأییدشده Phase 15.6:
+
+        بدهکار   2000 حساب‌های پرداختنی = TotalAmount (کاهش بدهی به تأمین‌کننده)
+        بستانکار 1200 موجودی کالا       = TotalAmount (کاهش موجودی کالا)
+
+    بر خلاف _build_purchase_journal_lines، این سند مالیات و تخفیف ندارد
+    (PurchaseReturnInvoices فیلد مالیات ندارد و تخفیف همیشه صفر است طبق
+    تصمیم صریح Brief) — پس فقط یک زوج ساده بدهکار/بستانکار دارد، نه چهار ردیف.
+
+    ردیفی که مبلغش صفر است اصلاً ساخته نمی‌شود؛ در آن صورت لیست خالی
+    برمی‌گردد و فراخوان نباید _post_journal_entry_on_cursor را با یک سند
+    خالی صدا بزند (همان قرارداد _build_purchase_journal_lines).
+    """
+    lines = []
+
+    if abs(total_amount) > _ZERO_TOLERANCE:
+        lines.append({
+            "account_code": ACCOUNT_ACCOUNTS_PAYABLE,
+            "debit": total_amount,
+            "description": "کاهش بدهی به تأمین‌کننده بابت برگشت از خرید",
+        })
+        lines.append({
+            "account_code": ACCOUNT_INVENTORY,
+            "credit": total_amount,
+            "description": "کاهش موجودی کالا بابت برگشت از خرید",
+        })
+
+    return lines
 
 
 def get_suppliers():
@@ -141,10 +240,13 @@ def create_purchase_invoice(supplier_id: int, shamsi_date: str, discount_amount:
     conn = db.connect()
     cursor = conn.cursor()
     try:
-        total_amount = sum(
-            float(i["quantity"]) * float(i["unit_price"]) - float(i.get("discount", 0) or 0)
-            for i in items
-        )
+        # inventory_amount: SUM(quantity × raw_unit_price) — بدون کسر تخفیف،
+        # چون ProductPurchaseLayers.UnitPrice (پایین‌تر) هم قیمت خام را نگه
+        # می‌دارد؛ اثر تخفیف جداگانه در item_discount_total محاسبه و در سند
+        # حسابداری به حساب 5100 (تخفیف خرید) می‌رود، نه از موجودی کم می‌شود.
+        inventory_amount = sum(float(i["quantity"]) * float(i["unit_price"]) for i in items)
+        item_discount_total = sum(float(i.get("discount", 0) or 0) for i in items)
+        total_amount = inventory_amount - item_discount_total
         payable = total_amount - float(discount_amount or 0) + float(tax_amount or 0)
 
         cursor.execute("SELECT ISNULL(MAX(InvoiceNumber), 1000) + 1 AS NextNum FROM PurchaseInvoices")
@@ -219,7 +321,31 @@ def create_purchase_invoice(supplier_id: int, shamsi_date: str, discount_amount:
                  f"فاکتور خرید شماره {invoice_number}", user_id)
             )
 
+        # --- ثبت سند حسابداری دوطرفه (Journal Entry) در همان Transaction اتمیک فاکتور ---
+        # عمداً از همان Cursor/Connection فاکتور استفاده می‌شود (نه یک
+        # Connection جدا) تا فاکتور خرید و سند حسابداری آن واقعاً یک واحد
+        # اتمیک باشند: یا هر دو با هم Commit می‌شوند، یا (در صورت هر خطایی،
+        # از جمله موازنه‌نبودن سند یا نبود یک حساب در Chart of Accounts)
+        # با هم کامل Rollback می‌شوند.
+        journal_lines = _build_purchase_journal_lines(
+            inventory_amount=inventory_amount,
+            tax_amount=float(tax_amount or 0),
+            discount_total=item_discount_total + float(discount_amount or 0),
+            payable=payable,
+        )
+        if journal_lines:
+            _post_journal_entry_on_cursor(
+                cursor,
+                shamsi_date=shamsi_date,
+                description=f"فاکتور خرید شماره {invoice_number}",
+                lines=journal_lines,
+                user_id=user_id,
+                source_table="PurchaseInvoices",
+                source_id=invoice_id,
+            )
+
         conn.commit()
+        create_audit_entry(user_id, "Create", "PurchaseInvoices", invoice_id, f"Purchase invoice {invoice_number}")
         return invoice_id, invoice_number
 
     except Exception:
@@ -415,7 +541,26 @@ def create_purchase_return_invoice(original_invoice_id: int, shamsi_date: str,
                  user_id)
             )
 
+        # --- ثبت سند حسابداری دوطرفه (Journal Entry) در همان Transaction اتمیک برگشت ---
+        # عمداً از همان Cursor/Connection فاکتور برگشت استفاده می‌شود (همان
+        # الگوی create_purchase_invoice در Phase 15.3) تا فاکتور برگشت و سند
+        # حسابداری آن یک واحد اتمیک باشند: یا هر دو Commit می‌شوند یا (در
+        # صورت هر خطایی، از جمله نبود یک حساب در Chart of Accounts) با هم
+        # کامل Rollback می‌شوند.
+        journal_lines = _build_purchase_return_journal_lines(total_amount=total_amount)
+        if journal_lines:
+            _post_journal_entry_on_cursor(
+                cursor,
+                shamsi_date=shamsi_date,
+                description=f"فاکتور برگشت خرید شماره {invoice_number}",
+                lines=journal_lines,
+                user_id=user_id,
+                source_table="PurchaseReturnInvoices",
+                source_id=return_invoice_id,
+            )
+
         conn.commit()
+        create_audit_entry(user_id, "Create", "PurchaseReturnInvoices", return_invoice_id, f"Purchase return invoice {invoice_number}")
         return return_invoice_id, invoice_number
 
     except Exception:

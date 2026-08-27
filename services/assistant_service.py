@@ -13,6 +13,7 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.db import Database
+from services.audit_service import create_audit_entry
 import services.reports_service as rs
 from services.inventory_service import get_low_stock_products
 from utils import date_ranges as dr
@@ -28,18 +29,23 @@ def is_assistant_enabled() -> bool:
     return row is not None and row["SettingValue"] == "1"
 
 
-def set_assistant_enabled(enabled: bool):
+def set_assistant_enabled(enabled: bool, user_id: int = None):
     db = Database()
     existing = db.fetch_one("SELECT ID FROM Settings WHERE SettingKey = 'AiAssistantEnabled'")
     value = "1" if enabled else "0"
     if existing:
         db.execute("UPDATE Settings SET SettingValue = ? WHERE SettingKey = 'AiAssistantEnabled'", (value,))
+        action = "Update"
+        record_id = existing["ID"]
     else:
-        db.execute(
+        record_id = db.execute(
             "INSERT INTO Settings (SettingKey, SettingValue, Description) VALUES (?, ?, ?)",
             ("AiAssistantEnabled", value, "دسترسی خواندنی دستیار هوش مصنوعی به داده‌های حسابداری")
         )
+        action = "Create"
     db.close()
+
+    create_audit_entry(user_id, action, "Settings", record_id, f"AiAssistantEnabled changed to {value}")
 
 
 def fmt(n):
