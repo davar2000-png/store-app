@@ -312,3 +312,80 @@ tests/test_web_skeleton.py
 
 **فاز بعدی:** 16C — Auth Extraction + Session Login — شروع نشده، منوط به
 تأیید صریح کاربر.
+
+## Phase 16C — Auth Extraction + Session Login
+
+**Base commit:** `2ece6da` (Phase 16B — Web Backend Skeleton)
+**Branch:** `phase/16c-auth-extraction`
+
+هدف: افزودن لایه مستقل Authentication و Session Management برای وب،
+بدون حذف یا بازنویسی هیچ منطق موجود (`ui/login_window.py`,
+`services/session_service.py`, `utils/security.py` همگی دست‌نخورده
+باقی ماندند).
+
+**خارج از محدوده این فاز (طبق تصمیم صریح پروژه):**
+- HTML Login UI — به Phase16D موکول شد؛ `/login` و `/logout` فقط API
+  سطح JSON هستند.
+- Dashboard و گزارش‌های وب.
+- هرگونه تغییر در معماری/جداول Legacy حسابداری
+  (`DocHeader → Transaction → DetailAccounts`, `Customers`, `Factors`,
+  `Cashs`, `CashBox`, `ChequeRecs`, `ChequePays`).
+
+**فایل‌های اضافه‌شده:**
+```text
+services/auth_service.py
+services/web_session_service.py
+database/migrations/015_web_sessions.sql
+tests/test_auth_service.py
+tests/test_web_session_service.py
+tests/test_web_login.py
+```
+
+**فایل‌های تغییریافته:**
+```text
+tests/_fake_database.py   (افزوده شدن پشتیبانی Users/WebSessions؛ رفتار
+                            قبلی Sessions/Drafts/AuditLogs دست‌نخورده)
+web/app.py                (افزوده شدن POST /login و POST /logout؛
+                            GET / و GET /health دست‌نخورده)
+```
+
+**جدول جدید:** `WebSessions` (`database/migrations/015_web_sessions.sql`)
+— کاملاً مستقل از جدول `Sessions` موجود (که برای بازیابی قطع برق
+دسکتاپ است). فقط `TokenHash` (نه توکن خام) ذخیره می‌شود. **این
+Migration اجرا نشده است** — طبق قانون پروژه، فقط فایل SQL نوشته شده تا
+پیش از ورود قطعی Phase16C به صورت دستی و آگاهانه اجرا شود.
+
+**معماری:**
+```
+web/app.py (POST /login, POST /logout)
+        │
+        ├──▶ services/auth_service.py ──▶ utils/security.py (موجود)
+        │           │
+        │           └──▶ database/db.py ──▶ Users (فقط SELECT + UPDATE LastLogin)
+        │
+        └──▶ services/web_session_service.py ──▶ database/db.py ──▶ WebSessions (جدید)
+```
+
+- توکن Session به‌صورت `secrets.token_urlsafe(32)` ساخته می‌شود، فقط هش
+  SHA-256 آن در دیتابیس ذخیره می‌شود، و توکن خام در یک Cookie با
+  `HttpOnly` قرار می‌گیرد.
+- خطای اتصال دیتابیس در `/login`/`/logout` به‌صورت پاسخ صادقانه `503`
+  گزارش می‌شود (نه یک ۵۰۰ خام با Traceback) — همان اصل `/health`.
+
+**تست:**
+- `tests/test_auth_service.py` → 7 passed
+- `tests/test_web_session_service.py` → 11 passed
+- `tests/test_web_login.py` → 10 passed
+- Full suite → **245 passed** (217 قبلی + 28 جدید)
+- علاوه بر TestClient، سرور با `uvicorn` واقعاً روی `127.0.0.1` اجرا و با
+  `curl` بررسی شد. در این sandbox درایور ODBC/SQL Server واقعی نصب نیست؛
+  رفتار `503` برای `/login` در همین شرایط واقعی تأیید شد (نه فرضی).
+
+**عمداً در این فاز انجام نشد:**
+- Migration اجرا نشد و Merge به `main` انجام نشد (طبق قانون پروژه).
+- هیچ صفحه HTML برای Login ساخته نشد.
+- `home()` در `web/app.py` هنوز Auth-gate نشده (صفحات محافظت‌شده خارج از
+  محدوده این فاز است).
+
+**فاز بعدی:** 16D — Web Dashboard — شروع نشده، منوط به تأیید صریح کاربر و
+تکمیل واقعی و بررسی‌شدهٔ Phase16C.
