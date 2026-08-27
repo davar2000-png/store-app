@@ -1,0 +1,574 @@
+From 31b9a0e6726e222cbb45c10b2d9e07979b25a5d3 Mon Sep 17 00:00:00 2001
+From: StoreApp Dev <dev@storeapp.local>
+Date: Thu, 27 Aug 2026 11:59:23 +0000
+Subject: [PATCH 1/2] feat(phase16d): auth-gate dashboard with login page
+ (skeleton)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Add GET /login-page: pure HTML consumer of existing POST /login API,
+  no new auth logic. Renders web/templates/login.html.
+- Add get_current_user dependency in web/app.py: thin wrapper around
+  the existing web_session_service.validate_session — behavior of
+  validate_session is unchanged, auth_service.py and
+  web_session_service.py are untouched.
+- Auth-gate GET / (home -> dashboard): unauthenticated requests get a
+  303 redirect to /login-page. No DB call happens when no session
+  cookie is present (validate_session short-circuits on empty token).
+- Rename templates/home.html -> templates/dashboard.html; dashboard
+  shows the logged-in user's name, session status, and a placeholder
+  list of allowed modules derived only from the existing Users.IsAdmin
+  flag. Explicitly does NOT query Transaction/Factors/DocHeader or any
+  other Legacy financial data.
+- tests/_fake_database.py: add fetch_one support for
+  'SELECT * FROM Users WHERE ID = ?' (needed to resolve UserRef from
+  validate_session into a display name). No other fixture behavior
+  changed.
+- tests/test_web_dashboard.py: new tests
+  test_dashboard_requires_login, test_dashboard_with_valid_session,
+  test_logout_invalidates_session.
+- No changes to services/auth_service.py, services/web_session_service.py,
+  or database/migrations/015_web_sessions.sql. Migration NOT executed
+  against any real database. No Legacy financial structures touched.
+
+Full suite: 248 passed (245 previous + 3 new), 0 removed.
+---
+ tests/_fake_database.py      |  7 +++
+ tests/test_web_dashboard.py  | 81 +++++++++++++++++++++++++++++
+ web/app.py                   | 99 ++++++++++++++++++++++++++++++++++--
+ web/static/style.css         | 50 ++++++++++++++++++
+ web/templates/dashboard.html | 34 +++++++++++++
+ web/templates/home.html      | 16 ------
+ web/templates/login.html     | 67 ++++++++++++++++++++++++
+ 7 files changed, 333 insertions(+), 21 deletions(-)
+ create mode 100644 tests/test_web_dashboard.py
+ create mode 100644 web/templates/dashboard.html
+ delete mode 100644 web/templates/home.html
+ create mode 100644 web/templates/login.html
+
+diff --git a/tests/_fake_database.py b/tests/_fake_database.py
+index 4f8f8da..d52a1ad 100644
+--- a/tests/_fake_database.py
++++ b/tests/_fake_database.py
+@@ -214,6 +214,13 @@ class FakeDatabase:
+                     return copy.deepcopy(row)
+             return None
+ 
++        if "FROM USERS WHERE ID" in normalized:
++            user_id = params[0]
++            for row in self.__class__.users:
++                if row["ID"] == user_id:
++                    return copy.deepcopy(row)
++            return None
++
+         if "FROM WEBSESSIONS WHERE TOKENHASH" in normalized:
+             token_hash = params[0]
+             for row in self.__class__.web_sessions:
+diff --git a/tests/test_web_dashboard.py b/tests/test_web_dashboard.py
+new file mode 100644
+index 0000000..d12af1d
+--- /dev/null
++++ b/tests/test_web_dashboard.py
+@@ -0,0 +1,81 @@
++# -*- coding: utf-8 -*-
++"""
++Phase 16D — تست‌های Dashboard محافظت‌شده (Auth-gate روی `/`).
++
++این تست‌ها فقط لایه HTTP (FastAPI) را از طریق FakeDatabase بررسی می‌کنند؛
++به هیچ SQL Server واقعی نیاز ندارند. منطق validate_session خودش قبلاً در
++tests/test_web_session_service.py پوشش داده شده — اینجا فقط اتصال صحیح
++آن به route محافظت‌شده `/` بررسی می‌شود.
++"""
++
++from fastapi.testclient import TestClient
++
++import services.auth_service as auth_service
++import services.web_session_service as web_session_service
++import web.app as web_app
++from tests._fake_database import FakeDatabase
++from utils.security import hash_password
++from web.app import app
++
++client = TestClient(app)
++
++
++def setup_function():
++    FakeDatabase.reset()
++    auth_service.Database = FakeDatabase
++    web_session_service.Database = FakeDatabase
++    web_app.Database = FakeDatabase
++    client.cookies.clear()
++
++    password_hash, salt = hash_password("correct-horse")
++    FakeDatabase.users = [
++        {
++            "ID": 1,
++            "Username": "davar",
++            "PasswordHash": password_hash,
++            "PasswordSalt": salt,
++            "FullName": "Davar",
++            "IsAdmin": True,
++            "IsActive": True,
++            "LastLogin": None,
++        }
++    ]
++
++
++def _login():
++    return client.post(
++        "/login",
++        json={"username": "davar", "password": "correct-horse"},
++    )
++
++
++def test_dashboard_requires_login():
++    response = client.get("/", follow_redirects=False)
++    assert response.status_code == 303
++    assert response.headers["location"] == "/login-page"
++
++
++def test_dashboard_with_valid_session():
++    login_response = _login()
++    assert login_response.status_code == 200
++
++    response = client.get("/")
++    assert response.status_code == 200
++    assert "Davar" in response.text
++    # کاربر IsAdmin=True است، پس ماژول Placeholder مربوط به ادمین باید دیده شود.
++    assert "مدیریت کاربران" in response.text
++
++
++def test_logout_invalidates_session():
++    _login()
++
++    # قبل از logout، Dashboard باید بدون redirect در دسترس باشد.
++    assert client.get("/", follow_redirects=False).status_code == 200
++
++    logout_response = client.post("/logout")
++    assert logout_response.status_code == 200
++
++    # بعد از logout، همان Cookie دیگر نباید Session معتبری را نشان بدهد.
++    response = client.get("/", follow_redirects=False)
++    assert response.status_code == 303
++    assert response.headers["location"] == "/login-page"
+diff --git a/web/app.py b/web/app.py
+index 7381b3e..6fddf5f 100644
+--- a/web/app.py
++++ b/web/app.py
+@@ -20,6 +20,7 @@ endpoint جدید (`/login`, `/logout`) اضافه شده که فقط سرویس
+ import os
+ import sys
+ from pathlib import Path
++from typing import Optional
+ 
+ # اجازه import کردن `config` و `database.db` از ریشه‌ی پروژه، دقیقاً همان
+ # الگویی که database/db.py از آن استفاده می‌کند.
+@@ -27,8 +28,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ if str(PROJECT_ROOT) not in sys.path:
+     sys.path.append(str(PROJECT_ROOT))
+ 
+-from fastapi import FastAPI, Response
+-from fastapi.responses import HTMLResponse, JSONResponse
++from fastapi import Depends, FastAPI, Response
++from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+ from fastapi.staticfiles import StaticFiles
+ from fastapi.templating import Jinja2Templates
+ from pydantic import BaseModel
+@@ -36,6 +37,16 @@ from starlette.requests import Request
+ 
+ from services import auth_service, web_session_service
+ 
++try:
++    # همان الگوی auth_service.py / web_session_service.py: یک ارجاع
++    # ماژول‌سطح به Database تا تست‌ها بتوانند آن را با FakeDatabase عوض
++    # کنند. Import به‌صورت try/except است تا اگر درایور ODBC در محیط
++    # نصب نباشد، کل اپ وب (از جمله صفحات محافظت‌نشده) از کار نیفتد —
++    # دقیقاً همان اصلی که check_database_status از قبل رعایت می‌کند.
++    from database.db import Database
++except Exception:  # noqa: BLE001
++    Database = None
++
+ WEB_DIR = Path(__file__).resolve().parent
+ 
+ #: نام Cookie که توکن خام Session وب در آن نگه‌داری می‌شود.
+@@ -71,12 +82,90 @@ def check_database_status() -> dict:
+         return {"status": "not_connected", "detail": str(exc)}
+ 
+ 
++def get_current_user(request: Request) -> Optional[dict]:
++    """
++    Dependency برای Auth-gate کردن route ها (Phase 16D).
++
++    این تابع صرفاً یک wrapper است: هیچ منطق Auth/Session جدیدی اینجا
++    نوشته نمی‌شود و رفتار web_session_service.validate_session تغییر
++    نمی‌کند. فقط توکن خام را از Cookie می‌خواند، آن را به
++    validate_session موجود می‌دهد، و در صورت معتبر بودن Session، اطلاعات
++    غیرحساس کاربر (بدون PasswordHash/PasswordSalt) را برای نمایش در
++    Template برمی‌گرداند.
++
++    خروجی: دیکشنری کاربر در صورت Session معتبر، یا None در غیر این صورت
++    (Session نبود، منقضی شده، یا باطل شده بود).
++    """
++    raw_token = request.cookies.get(SESSION_COOKIE_NAME)
++    user_id = web_session_service.validate_session(raw_token)
++    if user_id is None:
++        return None
++    return _fetch_user_public_fields(user_id)
++
++
++def _fetch_user_public_fields(user_id: int) -> Optional[dict]:
++    """
++    یک SELECT ساده و فقط‌خواندنی روی جدول موجود Users برای نمایش نام
++    کاربر در Dashboard. هیچ جدول یا ستون جدیدی نمی‌سازد و به هیچ داده‌ی
++    مالی Legacy دست نمی‌زند.
++    """
++    if Database is None:
++        return None
++
++    db = Database()
++    try:
++        user = db.fetch_one("SELECT * FROM Users WHERE ID = ?", (user_id,))
++    finally:
++        db.close()
++
++    if not user:
++        return None
++
++    return {k: v for k, v in user.items() if k not in ("PasswordHash", "PasswordSalt")}
++
++
++def _derive_allowed_modules(user: dict) -> list:
++    """
++    لیست Placeholder از ماژول‌های در دسترس کاربر — فعلاً فقط بر اساس
++    پرچم موجود IsAdmin مشتق می‌شود. این Skeleton است، نه یک سیستم
++    Permission واقعی؛ به هیچ جدول Permission/Module جدیدی متصل نیست و
++    هیچ داده‌ی مالی (Transaction/Factors/DocHeader) را کوئری نمی‌کند.
++    """
++    modules = ["پیشخوان"]
++    if user.get("IsAdmin"):
++        modules.append("مدیریت کاربران (Placeholder — پیاده‌سازی‌نشده)")
++    return modules
++
++
+ @app.get("/", response_class=HTMLResponse)
+-def home(request: Request):
++def home(request: Request, current_user: Optional[dict] = Depends(get_current_user)):
++    if current_user is None:
++        return RedirectResponse(url="/login-page", status_code=303)
++
++    return templates.TemplateResponse(
++        request=request,
++        name="dashboard.html",
++        context={
++            "page_title": "پیشخوان — StoreApp",
++            "current_user": current_user,
++            "allowed_modules": _derive_allowed_modules(current_user),
++        },
++    )
++
++
++@app.get("/login-page", response_class=HTMLResponse)
++def login_page(request: Request):
++    """
++    فرم HTML ورود (Phase 16D).
++
++    این صفحه فقط UI است و مصرف‌کننده‌ی API موجود POST /login (بدون
++    تغییر) می‌باشد — هیچ منطق Auth جدیدی اینجا یا در سمت کلاینت نوشته
++    نشده است.
++    """
+     return templates.TemplateResponse(
+         request=request,
+-        name="home.html",
+-        context={"page_title": "پیشخوان — StoreApp"},
++        name="login.html",
++        context={"page_title": "ورود — StoreApp"},
+     )
+ 
+ 
+diff --git a/web/static/style.css b/web/static/style.css
+index a1a363f..1c9d437 100644
+--- a/web/static/style.css
++++ b/web/static/style.css
+@@ -52,6 +52,56 @@ body {
+     display: inline-block;
+ }
+ 
++.welcome-box form {
++    display: flex;
++    flex-direction: column;
++    gap: 0.75rem;
++    margin-top: 1rem;
++    max-width: 320px;
++}
++
++.welcome-box label {
++    display: flex;
++    flex-direction: column;
++    gap: 0.25rem;
++    font-size: 0.9rem;
++}
++
++.welcome-box input {
++    padding: 0.5rem;
++    border: 1px solid #ccc;
++    border-radius: 4px;
++    font-family: inherit;
++}
++
++.welcome-box button {
++    padding: 0.5rem 1rem;
++    background-color: #1f3a5f;
++    color: #fff;
++    border: none;
++    border-radius: 4px;
++    cursor: pointer;
++    width: fit-content;
++}
++
++.welcome-box button:hover {
++    background-color: #16283f;
++}
++
++.error-message {
++    color: #b00020;
++    margin-top: 0.75rem;
++}
++
++.module-list {
++    padding-inline-start: 1.25rem;
++}
++
++.note {
++    color: #555;
++    font-size: 0.9rem;
++}
++
+ .app-footer {
+     text-align: center;
+     color: #888;
+diff --git a/web/templates/dashboard.html b/web/templates/dashboard.html
+new file mode 100644
+index 0000000..3a8053d
+--- /dev/null
++++ b/web/templates/dashboard.html
+@@ -0,0 +1,34 @@
++{% extends "base.html" %}
++
++{% block content %}
++    <section class="welcome-box">
++        <h2>خوش آمدید، {{ current_user.FullName or current_user.Username }}</h2>
++        <p>وضعیت: وارد شده‌اید (Session معتبر).</p>
++
++        <h3>ماژول‌های در دسترس</h3>
++        <ul class="module-list">
++        {% for module in allowed_modules %}
++            <li>{{ module }}</li>
++        {% endfor %}
++        </ul>
++
++        <p class="note">
++            این پیشخوان هنوز در مرحله‌ی Skeleton قرار دارد (Phase 16D). هیچ
++            اتصال مستقیمی به اطلاعات مالی (فاکتور، تراکنش، اسناد) در این فاز
++            برقرار نشده؛ این کار منوط به تکمیل طراحی لایه‌ی گزارش‌گیری مالی
++            است.
++        </p>
++
++        <form id="logout-form">
++            <button type="submit">خروج</button>
++        </form>
++    </section>
++
++    <script>
++        document.getElementById("logout-form").addEventListener("submit", async function (event) {
++            event.preventDefault();
++            await fetch("/logout", { method: "POST" });
++            window.location.href = "/login-page";
++        });
++    </script>
++{% endblock %}
+diff --git a/web/templates/home.html b/web/templates/home.html
+deleted file mode 100644
+index 30f3d47..0000000
+--- a/web/templates/home.html
++++ /dev/null
+@@ -1,16 +0,0 @@
+-{% extends "base.html" %}
+-
+-{% block content %}
+-    <section class="welcome-box">
+-        <h2>به StoreApp خوش آمدید</h2>
+-        <p>
+-            این نسخه‌ی وب هنوز در مرحله‌ی اسکلت (Skeleton) قرار دارد.
+-            هیچ‌کدام از فرآیندهای واقعی فروش، خرید یا حسابداری هنوز از
+-            طریق مرورگر در دسترس نیستند.
+-        </p>
+-        <p>
+-            برای بررسی وضعیت سرور و اتصال دیتابیس به آدرس
+-            <code>/health</code> مراجعه کنید.
+-        </p>
+-    </section>
+-{% endblock %}
+diff --git a/web/templates/login.html b/web/templates/login.html
+new file mode 100644
+index 0000000..a477079
+--- /dev/null
++++ b/web/templates/login.html
+@@ -0,0 +1,67 @@
++{% extends "base.html" %}
++
++{% block content %}
++    <section class="welcome-box">
++        <h2>ورود به سامانه</h2>
++
++        <form id="login-form">
++            <label>
++                نام کاربری
++                <input type="text" name="username" autocomplete="username" required>
++            </label>
++            <label>
++                رمز عبور
++                <input type="password" name="password" autocomplete="current-password" required>
++            </label>
++            <button type="submit">ورود</button>
++        </form>
++
++        <p id="login-error" class="error-message" hidden></p>
++    </section>
++
++    <script>
++        // این فرم فقط مصرف‌کننده‌ی API موجود POST /login است؛ هیچ منطق
++        // احراز هویت جدیدی اینجا نوشته نشده — همان endpoint Phase16C.
++        document.getElementById("login-form").addEventListener("submit", async function (event) {
++            event.preventDefault();
++
++            const errorEl = document.getElementById("login-error");
++            errorEl.hidden = true;
++
++            const formData = new FormData(event.target);
++
++            let response;
++            try {
++                response = await fetch("/login", {
++                    method: "POST",
++                    headers: { "Content-Type": "application/json" },
++                    body: JSON.stringify({
++                        username: formData.get("username"),
++                        password: formData.get("password"),
++                    }),
++                });
++            } catch (networkError) {
++                errorEl.textContent = "ارتباط با سرور برقرار نشد.";
++                errorEl.hidden = false;
++                return;
++            }
++
++            if (response.ok) {
++                window.location.href = "/";
++                return;
++            }
++
++            let detail = "ورود ناموفق بود.";
++            try {
++                const data = await response.json();
++                if (data && data.detail) {
++                    detail = data.detail;
++                }
++            } catch (parseError) {
++                // پاسخ JSON نبود؛ پیام پیش‌فرض نمایش داده می‌شود.
++            }
++            errorEl.textContent = detail;
++            errorEl.hidden = false;
++        });
++    </script>
++{% endblock %}
+-- 
+2.43.0
+
+From a084f634d52a4d2397c9d210b4cb6109850848f1 Mon Sep 17 00:00:00 2001
+From: StoreApp Dev <dev@storeapp.local>
+Date: Thu, 27 Aug 2026 12:22:22 +0000
+Subject: [PATCH 2/2] docs(phase16d): record Web Dashboard verification +
+ session security review
+
+---
+ AI_HANDOFF.md | 66 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 66 insertions(+)
+
+diff --git a/AI_HANDOFF.md b/AI_HANDOFF.md
+index 162afa7..d4c2196 100644
+--- a/AI_HANDOFF.md
++++ b/AI_HANDOFF.md
+@@ -176,3 +176,69 @@ Auth Extraction + Session Login:
+ - سپس یک session-based login برای وب روی همان `services/auth_service.py`
+   بساز، نه یک پیاده‌سازی موازی.
+ - طبق قانون Brief، **این فاز فقط بعد از تأیید صریح کاربر شروع شود.**
++
++---
++
++## Phase 16D — Web Dashboard (Handoff Update — این Session)
++
++**Base commit:** `32bd263` (Phase 16C — Auth Extraction + Session Login)
++**Code commit (این Session):** `31b9a0e` — `feat(phase16d): auth-gate dashboard with login page (skeleton)`
++**Branch محلی:** `phase16d-work` (بر پایه دقیق `32bd263`)
++
++### وضعیت ورودی این Session
++کار Phase16D توسط Account قبلی به‌صورت یک فایل Patch
++(`phase-16d-web-dashboard-cc59233.patch`) روی `main` آپلود شده بود، اما
++هرگز روی هیچ Branch ای اعمال یا Commit نشده بود؛ Branch
++`phase/16d-web-dashboard` روی GitHub هنوز برابر `phase/14-workflow-audit`
++بود (خالی از این کار). این Session ابتدا این ناهم‌خوانی را کشف کرد، سپس:
++
++1. Patch را روی پایه صحیح (`32bd263`) اعمال کرد (`git am` — بدون Conflict).
++2. کل Test Suite را اجرا کرد.
++3. رعایت قوانین (بدون تغییر جداول/سرویس حسابداری، بدون اجرای Migration
++   015 روی DB واقعی) را دستی تأیید کرد.
++4. کد Session/Permission را از نظر امنیتی مرور کرد.
++
++### TESTS
++`python -m pytest tests/ -q` → **248 passed** (۲۴۵ قبل از این فاز + ۳ تست
++جدید Dashboard: `test_dashboard_requires_login`,
++`test_dashboard_with_valid_session`, `test_logout_invalidates_session`).
++مطابق دقیق ادعای Patch.
++
++### بررسی امنیتی Session/Permission (این Session)
++`services/web_session_service.py` بررسی شد — نکات مثبت:
++- توکن خام هرگز در DB ذخیره نمی‌شود؛ فقط SHA-256 آن.
++- `secrets.token_urlsafe(32)` برای تولید توکن (آنتروپی کافی).
++- انقضا (`ExpiresAt`) و ابطال (`IsRevoked`) هر دو چک می‌شوند؛ رکورد Logout
++  حذف نمی‌شود (Audit Trail حفظ می‌شود).
++- Cookie با `httponly=True` ست می‌شود (غیرقابل خواندن از JS).
++- Template ها (`login.html`, `dashboard.html`) از فیلتر `| safe`
++  استفاده نمی‌کنند؛ Auto-escaping پیش‌فرض Jinja2 فعال است (بدون XSS Gap
++  مشهود).
++
++نکات برای Phase بعدی (هیچ‌کدام Blocker نیستند، صرفاً Hardening):
++- Cookie فاقد `secure=True` است — قبل از هر Deploy روی HTTPS واقعی باید
++  اضافه شود (فعلاً برای localhost/dev بی‌ضرر است).
++- `/login` هیچ Rate Limiting/Lockout ندارد — مقاوم در برابر Brute Force
++  نیست.
++- `_derive_allowed_modules` هنوز Placeholder است، نه یک سیستم Permission
++  واقعی (خودِ Docstring هم همین را صادقانه اعلام کرده).
++
++### PUSH STATUS
++این Session هم به Repository دسترسی Push نداشت (`git push` با خطای
++«could not read Username» شکست خورد — بدون Token/Credential در Sandbox).
++Commit `31b9a0e` به‌صورت محلی روی Branch `phase16d-work` آماده و
++تست‌شده است. کاربر باید آن را (از طریق Bundle/Patch ارائه‌شده در پیام
++نهایی این Session) Fetch و روی `phase/16d-web-dashboard` واقعی در GitHub
++اعمال/Push کند.
++
++### NEXT PHASE — پیشنهاد برای Account/Session بعدی (16E)
++Session/Permission Hardening (نه یک فاز مالی، پس ریسک پایین است):
++- افزودن `secure=True` به Cookie (مشروط به آماده بودن HTTPS در محیط
++  Deploy — اگر هنوز localhost-only است، این را مستند کن و صبر کن).
++- افزودن Rate Limiting ساده روی `/login` (مثلاً چند تلاش ناموفق در بازه
++  زمانی، بر اساس IP یا Username).
++- تبدیل `_derive_allowed_modules` از Placeholder به یک سیستم Permission
++  واقعی — این احتمالاً نیاز به طراحی جدول Permission دارد؛ طبق قانون
++  Brief، قبل از افزودن جدول جدید حتماً تأیید کاربر گرفته شود.
++- طبق قانون Brief، Migration `015_web_sessions.sql` هنوز نباید روی SQL
++  Server واقعی اجرا شود مگر کاربر صریحاً این مرحله را تأیید کند.
+-- 
+2.43.0
+
