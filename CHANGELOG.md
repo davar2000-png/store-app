@@ -1,5 +1,27 @@
 # CHANGELOG.md
 
+## Phase 17 — Merge phase/14-workflow-audit → main
+
+### Decision
+- پروژهٔ تحلیل/اتصال به `RoboAccDB_Legacy` به‌طور کامل کنار گذاشته شد؛
+  ادامهٔ کار روی دیتابیس مستقل `StoreAppDB` است.
+
+### Merged
+- `git merge --no-ff origin/phase/14-workflow-audit` روی `main` — بدون
+  Conflict. شامل تمام کار Phase 13.5.1 تا 16B:
+  - موتور حسابداری دوطرفه (`accounting_service.py`, `ChartOfAccounts`,
+    `JournalEntries`) و اتصال کامل فروش/خرید/دریافت/پرداخت/برگشت به آن
+  - `audit_service.py` + `ui/audit_viewer_window.py`
+  - Migrationهای `008` تا `014`
+  - اسکلت وب FastAPI (`web/`) — Phase 16B
+  - بیش از ۱۸۰ تست جدید
+
+### Verified
+- `python3 -m pytest -q tests` → `217 passed, 0 failed` پس از Merge
+
+### Pending
+- Push این Merge به GitHub (نیاز به اقدام کاربر — این Account دسترسی Push ندارد)
+
 ## Phase 12 — Stabilization + GitHub Normalization
 
 ### Fixed
@@ -22,3 +44,29 @@
 ### Known Issues
 - پاکسازی کامل Git History هنوز انجام نشده
 - AutoSave/Draft Recovery هنوز به فرم‌های واقعی وصل نشده
+
+## Phase 16B — Web Backend Skeleton
+
+### Added
+- `web/app.py`: اپلیکیشن FastAPI با `GET /`, `GET /health`,
+  static mount در `/static`
+- `web/templates/base.html`, `web/templates/home.html`: قالب Jinja2،
+  RTL/فارسی
+- `web/static/style.css`: استایل حداقلی، بدون framework
+- `requirements-web.txt`: `fastapi==0.141.1`, `uvicorn==0.52.4`,
+  `jinja2==3.1.6`
+- `tests/test_web_skeleton.py`: ۱۰ تست جدید (home 200/HTML/RTL/title,
+  health 200/status/database field, static css, 404)
+
+### Verified
+- FastAPI TestClient: 10/10 passed
+- Full regression suite: 217 passed (۲۰۷ قبلی + ۱۰ جدید)
+- اجرای واقعی `uvicorn` روی `127.0.0.1:8000` + تست با `curl`
+  (HTTP smoke test واقعی، نه فقط TestClient)
+
+### Not Verified
+- تست با مرورگر Chrome واقعی — هنوز انجام نشده
+
+### Unchanged
+- `ui/`, `services/`, `database/`, `utils/`, `main.py`, `config.py`,
+  `requirements.txt`, هیچ migration ای
