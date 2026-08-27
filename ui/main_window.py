@@ -27,6 +27,7 @@ from ui.import_window import ImportWindow
 from ui.backup_window import BackupWindow
 from ui.assistant_window import AssistantWindow
 from ui.settings_window import SettingsWindow
+from ui.audit_viewer_window import AuditViewerWindow
 from services.inventory_service import get_low_stock_products
 import services.settings_service as ss
 
@@ -95,12 +96,15 @@ class MainWindow(QMainWindow):
             ("🗄️ پشتیبان‌گیری", self.open_backup, "ModuleBackup"),
             ("🤖 دستیار هوش مصنوعی", self.open_assistant, "ModuleAssistant"),
             ("⚙️ تنظیمات", self.open_settings, "__AdminOnly__"),  # فقط مدیر سیستم
+            ("📜 گزارش رویدادها (Audit)", self.open_audit_viewer, "__AuditOnly__"),
         ]
 
         row, col = 0, 0
         for text, handler, perm_key in modules:
             if perm_key == "__AdminOnly__" and not self.current_user.get("IsAdmin"):
                 continue  # فقط مدیر سیستم این دکمه را می‌بیند
+            if perm_key == "__AuditOnly__" and not self._can_view_audit():
+                continue  # فقط مدیر یا کاربر با Permission صریح audit.view
             if perm_key and perm_key != "__AdminOnly__" and not ss.is_module_allowed(self.current_user, perm_key):
                 continue  # کاربر به این بخش دسترسی ندارد؛ دکمه اصلاً نمایش داده نمی‌شود
             btn = QPushButton(text)
@@ -198,6 +202,25 @@ class MainWindow(QMainWindow):
     def open_assistant(self):
         self.assistant_win = AssistantWindow(self.current_user)
         self.assistant_win.show()
+
+    def _can_view_audit(self) -> bool:
+        """
+        برخلاف is_module_allowed معمول، پیش‌فرض اینجا False است — یعنی کاربری که
+        صراحتاً audit.view برایش فعال نشده، دکمه را اصلاً نمی‌بیند. مدیر همیشه دسترسی دارد.
+        """
+        if self.current_user.get("IsAdmin"):
+            return True
+        permissions = ss.get_user_permissions(self.current_user["ID"])
+        return permissions.get("audit.view", False)
+
+    def open_audit_viewer(self):
+        if not self._can_view_audit():
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "دسترسی غیرمجاز",
+                                 "شما اجازه مشاهده گزارش رویدادها را ندارید.")
+            return
+        self.audit_viewer_win = AuditViewerWindow(self.current_user)
+        self.audit_viewer_win.show()
 
     def not_ready(self):
         from PyQt6.QtWidgets import QMessageBox

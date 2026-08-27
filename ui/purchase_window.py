@@ -306,7 +306,7 @@ class NewPurchaseInvoiceDialog(QDialog):
             return
 
         try:
-            draft_service.discard_draft(self.draft_id)
+            draft_service.discard_draft(self.draft_id, self.current_user["ID"])
         except Exception:
             logger.exception("خطا در دور ریختن پیش‌نویس فاکتور خرید")
 
@@ -339,7 +339,7 @@ class NewPurchaseInvoiceDialog(QDialog):
             # (Phase 13.2) فاکتور با موفقیت ثبت شد؛ Draft مربوطه (در صورت وجود) بسته می‌شود
             if self.draft_id:
                 try:
-                    draft_service.complete_draft(self.draft_id)
+                    draft_service.complete_draft(self.draft_id, self.current_user["ID"])
                 except Exception:
                     logger.exception("خطا در نهایی‌کردن Draft بعد از ثبت فاکتور خرید")
                 finally:
