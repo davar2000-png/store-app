@@ -1,0 +1,1234 @@
+From ea3ba0a53fd7c35e9332686e8cb25cc1dc427453 Mon Sep 17 00:00:00 2001
+From: AI Assistant <ai@example.com>
+Date: Thu, 27 Aug 2026 08:18:13 +0000
+Subject: [PATCH] =?UTF-8?q?feat(auth):=20Phase=2016C=20=E2=80=94=20extract?=
+ =?UTF-8?q?=20auth=5Fservice=20+=20add=20web=20session=20login?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- services/auth_service.py: extract login logic from ui/login_window.py
+  into a UI-independent authenticate(username, password) function.
+  Same error messages/behavior as before, plus additive LastLogin update.
+- services/web_session_service.py: cookie-based web session login on a
+  dedicated WebSessions table, fully independent of the desktop
+  services/session_service.py (Phase 12 heartbeat/crash recovery).
+- database/migrations/015_web_sessions.sql: additive WebSessions table.
+- ui/login_window.py: now delegates to auth_service (no user-visible
+  behavior change).
+- web/app.py: add GET/POST /login, POST /logout, protect "/";
+  /health stays unauthenticated per Phase 16B decision.
+- web/templates/login.html (new), home.html/style.css updated for
+  logged-in user + logout button.
+- requirements-web.txt: add python-multipart (required by FastAPI Form
+  parsing for POST /login).
+- tests: test_auth_service.py (8), test_web_session_service.py (8),
+  test_web_auth.py (11) — full suite: 244 passed (217 previous + 27 new,
+  zero regressions).
+- Docs: AI_HANDOFF.md, PHASE_REGISTRY.md, database/README.md updated.
+---
+ AI_HANDOFF.md                            | 108 +++++++++++++++-
+ PHASE_REGISTRY.md                        |  82 +++++++++++++
+ database/README.md                       |   1 +
+ database/migrations/015_web_sessions.sql |  34 +++++
+ requirements-web.txt                     |   1 +
+ services/auth_service.py                 |  85 +++++++++++++
+ services/web_session_service.py          |  80 ++++++++++++
+ tests/test_auth_service.py               | 137 +++++++++++++++++++++
+ tests/test_web_auth.py                   | 150 +++++++++++++++++++++++
+ tests/test_web_session_service.py        | 109 ++++++++++++++++
+ ui/login_window.py                       |  24 +---
+ web/app.py                               | 100 +++++++++++++--
+ web/static/style.css                     |  54 ++++++++
+ web/templates/home.html                  |   8 +-
+ web/templates/login.html                 |  21 ++++
+ 15 files changed, 958 insertions(+), 36 deletions(-)
+ create mode 100644 database/migrations/015_web_sessions.sql
+ create mode 100644 services/auth_service.py
+ create mode 100644 services/web_session_service.py
+ create mode 100644 tests/test_auth_service.py
+ create mode 100644 tests/test_web_auth.py
+ create mode 100644 tests/test_web_session_service.py
+ create mode 100644 web/templates/login.html
+
+diff --git a/AI_HANDOFF.md b/AI_HANDOFF.md
+index 162afa7..f4d8a38 100644
+--- a/AI_HANDOFF.md
++++ b/AI_HANDOFF.md
+@@ -4,16 +4,17 @@
+ > اعتماد نکنید — GitHub مرجع اصلی است.
+ 
+ ## LAST ACCOUNT
+-Claude (Phase 15.2 — اتصال فروش به حسابداری دوطرفه)
++Claude (Phase 16C — Auth Extraction + Session Login)
+ 
+ ## CURRENT PHASE
+-15.2 — تکمیل‌شده (روی برنچ `phase/14-workflow-audit`)
++16C — کد کامل و تست‌شده، اما **Push نشده** (بخش «PUSH STATUS» پایین
++همین فایل را ببینید)
+ 
+ ## CURRENT BRANCH
+-`phase/14-workflow-audit`
+-(همچنان به `main` Merge نشده — این تصمیم از Phase 14.3 به بعد ادامه دارد
+-و توسط این اکانت هم تغییر داده نشد؛ کاربر باید Merge را وقتی صلاح دید
+-انجام دهد.)
++`phase/16c-auth-extraction` (بر پایه‌ی `phase/14-workflow-audit`)
++(هیچ‌کدام از این دو برنچ هنوز به `main` Merge نشده‌اند — این تصمیم از
++Phase 14.3 به بعد ادامه دارد؛ کاربر باید Merge را وقتی صلاح دید انجام
++دهد.)
+ 
+ ## LAST COMMIT
+ جزئیات کامل Commit hashها در پیام نهایی همین Account به کاربر گزارش شده
+@@ -176,3 +177,98 @@ Auth Extraction + Session Login:
+ - سپس یک session-based login برای وب روی همان `services/auth_service.py`
+   بساز، نه یک پیاده‌سازی موازی.
+ - طبق قانون Brief، **این فاز فقط بعد از تأیید صریح کاربر شروع شود.**
++
++---
++
++## Phase 16C — Auth Extraction + Session Login (Handoff Update)
++
++**Base:** روی `phase/14-workflow-audit` (شامل کامل Phase 16B)
++**Branch:** `phase/16c-auth-extraction`
++
++## COMPLETED (این اکانت)
++- Clone واقعی ریپو و بررسی مستقیم کد فعلی (نه اعتماد به هیچ ادعای قبلی
++  درباره‌ی کاری که «قبلاً انجام شده»)؛ Baseline تأیید شد: 217 تست موفق
++  روی `phase/14-workflow-audit`، دقیقاً مطابق همین فایل.
++- `services/auth_service.py` (جدید): استخراج کامل منطق ورود از
++  `ui/login_window.py` به یک تابع خالص `authenticate(username, password)`
++  مستقل از UI، با همان پیام‌های خطای قبلی + قابلیت جدید Additive:
++  به‌روزرسانی `Users.LastLogin` بعد از ورود موفق.
++- `ui/login_window.py` بازنویسی شد تا فقط `authenticate()` را صدا بزند؛
++  هیچ پیام یا رفتار قابل‌مشاهده‌ای برای کاربر دسکتاپ تغییر نکرد.
++- `services/web_session_service.py` (جدید): Session Login مبتنی بر
++  Cookie برای وب، روی جدول اختصاصی `WebSessions` — عمداً کاملاً جدا از
++  `services/session_service.py` (Phase 12، چرخه‌ی اجرای دسکتاپ).
++- `database/migrations/015_web_sessions.sql` (additive، هم‌الگو با
++  Migrationهای قبلی).
++- `web/app.py`: افزودن `/login` (GET+POST) و `/logout`، محافظت واقعی از
++  `/` (Redirect به `/login` بدون Session معتبر). `/health` طبق تصمیم
++  Phase 16B همچنان بدون Auth.
++- `web/templates/login.html` (جدید) + به‌روزرسانی `home.html` (نمایش
++  کاربر لاگین‌شده + دکمه خروج) + استایل مرتبط در `style.css`.
++- `requirements-web.txt`: افزودن `python-multipart==0.0.32` (لازم برای
++  پارس فرم POST در FastAPI؛ بدون آن FastAPI هنگام تعریف route با
++  RuntimeError بالا می‌آورد).
++- تست‌های جدید: `tests/test_auth_service.py` (۸)،
++  `tests/test_web_session_service.py` (۸)، `tests/test_web_auth.py`
++  (۱۱؛ end-to-end روی TestClient با auth_service/web_session_service
++  monkeypatch‌شده).
++- علاوه بر TestClient، سرور واقعی با `uvicorn` روی `127.0.0.1` اجرا و با
++  `curl` بررسی شد (جزئیات کامل در `PHASE_REGISTRY.md § Phase 16C`).
++- `py_compile` روی همه فایل‌های تغییرکرده/جدید و `git diff --check` تمیز.
++- به‌روزرسانی `database/README.md`, `PHASE_REGISTRY.md`, `AI_HANDOFF.md`
++  (همین فایل).
++
++## NOT COMPLETED / آگاهانه واگذارشده به فاز بعد
++- ورود واقعی با مرورگر Chrome در برابر یک SQL Server واقعی — این sandbox
++  دسترسی به ODBC Driver/SQL Server ندارد (`/health` صادقانه
++  `not_connected` گزارش می‌دهد؛ رفتار مورد انتظار، نه باگ).
++- هیچ صفحه‌ای غیر از `/` پشت Auth قرار نگرفت.
++- Rate limiting/قفل حساب بعد از تلاش‌های ناموفق ورود، و Remember-me —
++  خارج از دامنه‌ی این فاز.
++- `phase/16c-auth-extraction` و `phase/14-workflow-audit` هنوز به `main`
++  Merge نشده‌اند.
++
++## FILES CHANGED (این اکانت)
++**ایجادشده:**
++`services/auth_service.py`, `services/web_session_service.py`,
++`database/migrations/015_web_sessions.sql`, `web/templates/login.html`,
++`tests/test_auth_service.py`, `tests/test_web_session_service.py`,
++`tests/test_web_auth.py`
++
++**تغییریافته:**
++`ui/login_window.py`, `web/app.py`, `web/templates/home.html`,
++`web/static/style.css`, `requirements-web.txt`, `database/README.md`,
++`PHASE_REGISTRY.md`, `AI_HANDOFF.md`
++
++## DATABASE CHANGES
++یک Migration جدید و امن (`015_web_sessions.sql`) که فقط جدول جدید
++`WebSessions` را می‌سازد (`IF OBJECT_ID(...) IS NULL`، هم‌الگوی بقیه
++Migrationها). به هیچ جدول موجودی (`Users`, `Sessions`, و غیره) دست
++نمی‌زند. کاربر باید این Migration را روی دیتابیس واقعی‌اش اجرا کند تا
++Session Login وب کار کند؛ تا قبل از آن، `POST /login` با خطای اتصال به
++جدول `WebSessions` مواجه می‌شود (صادقانه گزارش می‌شود، نه Fail خاموش).
++
++## TESTS
++`python -m pytest tests/ -q` → **244 passed** (۲۱۷ قبلی + ۲۷ جدید، هیچ‌کدام
++از تست‌های قبلی تغییر نکردند).
++`python -m py_compile` روی همه فایل‌های تغییرکرده/جدید → بدون خطا.
++`git diff --check` → بدون خطای Whitespace.
++
++⚠️ این Account هم مثل Phase 15.2 با نبود `libodbc.so.2`/`pyodbc`/`jdatetime`
++در sandbox پیش‌فرض مواجه شد؛ با `apt-get install unixodbc unixodbc-dev` +
++`pip install pyodbc jdatetime` رفع شد. همچنین `fastapi`/`uvicorn`/`jinja2`/
++`httpx`/`python-multipart` هم در sandbox پیش‌فرض نبودند و نصب شدند — این
++پیش‌نیازها باید طبق `requirements.txt`/`requirements-web.txt` روی محیط
++واقعی کاربر هم نصب باشند.
++
++## PUSH STATUS
++این Account به Repository دسترسی Push نداشت (بدون Token/Credential در
++Sandbox). تمام تغییرات به‌صورت Commit محلی روی `phase/16c-auth-extraction`
++(بر پایه دقیق `phase/14-workflow-audit`) آماده و تست‌شده‌اند، اما **Push
++نشده‌اند** — کاربر باید آن‌ها را از طریق Patch/Bundle ارائه‌شده در پیام
++نهایی، اعمال و Push کند.
++
++## NEXT PHASE — پیشنهاد برای Account/Session بعدی
++اتصال واقعی UI وب به Session کاربر لاگین‌شده (نمایش داده‌ی واقعی فروشگاه
++پشت `/` به‌جای صفحه‌ی خوش‌آمدگویی فعلی) — طبق قانون Brief، فقط بعد از
++تأیید صریح کاربر شروع شود.
+diff --git a/PHASE_REGISTRY.md b/PHASE_REGISTRY.md
+index a1a7ced..1dba23d 100644
+--- a/PHASE_REGISTRY.md
++++ b/PHASE_REGISTRY.md
+@@ -312,3 +312,85 @@ tests/test_web_skeleton.py
+ 
+ **فاز بعدی:** 16C — Auth Extraction + Session Login — شروع نشده، منوط به
+ تأیید صریح کاربر.
++
++## Phase 16C — Auth Extraction + Session Login
++
++**Base:** `phase/14-workflow-audit` (شامل کامل Phase 16B)
++**Branch:** `phase/16c-auth-extraction`
++
++هدف: بیرون کشیدن منطق ورود از `ui/login_window.py` (که مستقیماً
++`database.db.Database` و `utils.security.verify_password` را مصرف
++می‌کرد) به یک سرویس مشترک مستقل از UI، و سپس افزودن Session Login واقعی
++به وب روی همان سرویس مشترک — نه یک پیاده‌سازی موازی.
++
++**فایل‌های اضافه‌شده:**
++```text
++services/auth_service.py
++services/web_session_service.py
++database/migrations/015_web_sessions.sql
++web/templates/login.html
++tests/test_auth_service.py
++tests/test_web_session_service.py
++tests/test_web_auth.py
++```
++
++**فایل‌های تغییریافته:**
++```text
++ui/login_window.py       -- فقط جایگزینی منطق inline با فراخوانی auth_service؛
++                             پیام‌های خطا و رفتار قابل‌مشاهده برای کاربر دسکتاپ
++                             عیناً همان قبلی است.
++web/app.py                -- افزودن /login (GET+POST)، /logout، محافظت از "/".
++                             /health عمداً بدون احراز هویت باقی مانده.
++web/templates/home.html   -- نمایش نام کاربر لاگین‌شده + دکمه‌ی خروج.
++web/static/style.css      -- استایل فرم ورود/خروج.
++requirements-web.txt      -- افزودن python-multipart==0.0.32 (لازم برای
++                             پارس فرم POST /login در FastAPI).
++database/README.md        -- ثبت migration 015.
++```
++
++**طراحی کلیدی:**
++- `services/auth_service.py::authenticate(username, password)` دقیقاً
++  همان سه قانون قبلی `login_window.py` را با همان متن پیام‌های خطا پیاده
++  می‌کند (`InvalidCredentials` برای فیلد خالی/کاربر نامعتبر،
++  `WrongPassword` برای رمز اشتباه)، به‌علاوه یک رفتار Additive جدید:
++  به‌روزرسانی `Users.LastLogin` بعد از ورود موفق (ستونی که در Schema از
++  Phase 1 وجود داشت اما تا این فاز هیچ‌وقت مقداردهی نمی‌شد). شکست این
++  به‌روزرسانی هرگز ورود را مسدود نمی‌کند.
++- `services/web_session_service.py` یک Session Login مبتنی بر Token
++  تصادفی (`secrets.token_urlsafe`) و جدول اختصاصی `WebSessions` است —
++  **کاملاً جدا از** `services/session_service.py` (Phase 12) که برای
++  چرخه‌ی اجرای برنامه‌ی دسکتاپ (Heartbeat/Crash Detection/AutoSave)
++  است. این دو مفهوم عمداً قاطی نشدند.
++- Session طول عمر ثابت ۱۲ ساعته دارد (`SESSION_DURATION_HOURS`). Cookie
++  با `HttpOnly` + `SameSite=Lax` ست می‌شود؛ خود Session کاملاً
++  Server-side است (فقط Token در Cookie است، نه هیچ داده‌ی دیگر).
++- `/health` طبق تصمیم صریح Phase 16B عمداً بدون Auth باقی ماند.
++
++**تست:**
++- `tests/test_auth_service.py` → 8 passed (بدون هیچ وابستگی به PyQt یا DB واقعی)
++- `tests/test_web_session_service.py` → 8 passed
++- `tests/test_web_auth.py` → 11 passed (end-to-end روی TestClient، با
++  auth_service/web_session_service به‌صورت monkeypatch‌شده — دقیقاً همان
++  الگوی `tests/test_web_skeleton.py`)
++- Full suite → **244 passed** (۲۱۷ قبلی + ۲۷ جدید، هیچ‌کدام از تست‌های
++  قبلی تغییر نکردند)
++- HTTP smoke test واقعی با `uvicorn` روی `127.0.0.1` (نه فقط TestClient):
++  `GET /` بدون Cookie → Redirect به `/login` (200 نهایی)، `GET /login`
++  → 200، `GET /health` → 200 با گزارش صادقانه `not_connected` (این
++  sandbox درایور ODBC/SQL Server واقعی ندارد)، `POST /login` با داده‌ی
++  نامعتبر بدون DB → 503 با پیام خطای اتصال (نه یک ۵۰۰ خام یا Crash)،
++  `GET /static/style.css` → 200.
++- `py_compile` روی همه فایل‌های تغییرکرده/جدید و `git diff --check` → بدون خطا.
++
++**عمداً در این فاز انجام نشد:**
++- ورود واقعی با مرورگر Chrome و دیتابیس واقعی — این sandbox دسترسی به
++  SQL Server ندارد؛ فقط HTTP smoke test و TestClient تأیید شده‌اند.
++- هیچ صفحه‌ی دیگری غیر از `/` پشت Auth قرار نگرفت (فقط همان چیزی که در
++  Phase 16B وجود داشت).
++- Rate limiting یا قفل حساب بعد از چند تلاش ناموفق ورود — خارج از دامنه‌ی
++  این فاز؛ اگر لازم شود باید صریحاً به‌عنوان فاز جدا مطرح شود.
++- Remember-me / Refresh Token — Session فعلی فقط طول عمر ثابت دارد.
++
++**فاز بعدی:** پیشنهاد — اتصال واقعی UI وب به Session کاربر (نمایش
++اطلاعات واقعی فروشگاه پشت `/` به‌جای صفحه‌ی خوش‌آمدگویی فعلی)، منوط به
++تأیید صریح کاربر.
+diff --git a/database/README.md b/database/README.md
+index aa0be73..29e1200 100644
+--- a/database/README.md
++++ b/database/README.md
+@@ -20,6 +20,7 @@
+ | 008_audit_logs.sql | (Phase 14) Audit Trail — `AuditLogs` |
+ | 009_accounting_core.sql | (Phase 15.1) Chart of Accounts + Journal Entries — **فقط زیرساخت، هنوز به هیچ تراکنش تجاری وصل نشده** (جزئیات در `PHASE_REGISTRY.md`) |
+ | 010_accounting_tax_payable.sql | (Phase 15.2) افزودن حساب `2200` (مالیات دریافتنی از مشتری/پرداختنی به سازمان مالیاتی) — برای موازنه سند حسابداری فروش وقتی `TaxAmount > 0` باشد (جزئیات در `PHASE_REGISTRY.md`) |
++| 015_web_sessions.sql | (Phase 16C) جدول `WebSessions` — Session Login مبتنی بر Cookie برای وب، کاملاً مستقل از `Sessions` (Phase 12، چرخه‌ی اجرای دسکتاپ) |
+ 
+ ## قانون طلایی
+ هرگز `schema/001_fresh_install.sql` را روی دیتابیسی که کاربر واقعی و داده واقعی دارد اجرا نکنید. همیشه از `migrations/` به ترتیب شماره استفاده کنید، و همیشه قبل از اجرای هر Migration، از دیتابیس Backup بگیرید.
+diff --git a/database/migrations/015_web_sessions.sql b/database/migrations/015_web_sessions.sql
+new file mode 100644
+index 0000000..e4c2bff
+--- /dev/null
++++ b/database/migrations/015_web_sessions.sql
+@@ -0,0 +1,34 @@
++-- =========================================================
++-- Phase 16C — Auth Extraction + Session Login (Web)
++-- =========================================================
++-- این Migration فقط یک جدول جدید اضافه می‌کند و به هیچ جدول موجودی
++-- (Users, Sessions و غیره) دست نمی‌زند.
++--
++-- WebSessions کاملاً مستقل از جدول Sessions (ساخته‌شده در
++-- database/migrations/007_session_recovery.sql) است:
++--   - Sessions (Phase 12) برای ردیابی چرخه‌ی اجرای برنامه‌ی دسکتاپ است
++--     (Heartbeat, Crash Detection, AutoSave) و هیچ ربطی به احراز هویت
++--     ندارد.
++--   - WebSessions فقط برای Session Login مرورگر است: یک Token تصادفی
++--     Cookie-based که به یک کاربر و یک زمان انقضا وصل است.
++-- این دو مفهوم عمداً در دو جدول جدا نگه داشته شده‌اند تا هیچ‌کدام رفتار
++-- دیگری را تحت تأثیر قرار ندهد.
++-- =========================================================
++
++USE StoreAppDB;
++GO
++
++IF OBJECT_ID('WebSessions', 'U') IS NULL
++BEGIN
++    CREATE TABLE WebSessions (
++        Token       NVARCHAR(64)  NOT NULL PRIMARY KEY,
++        UserRef     INT           NOT NULL FOREIGN KEY REFERENCES Users(ID),
++        CreatedAt   DATETIME2     NOT NULL DEFAULT GETDATE(),
++        ExpiresAt   DATETIME2     NOT NULL
++    );
++    CREATE INDEX IX_WebSessions_UserRef ON WebSessions(UserRef);
++    CREATE INDEX IX_WebSessions_ExpiresAt ON WebSessions(ExpiresAt);
++END
++GO
++
++PRINT N'✅ جدول Phase 16C (WebSessions) با موفقیت ساخته شد.';
+diff --git a/requirements-web.txt b/requirements-web.txt
+index 58d2640..74fc02a 100644
+--- a/requirements-web.txt
++++ b/requirements-web.txt
+@@ -1,3 +1,4 @@
+ fastapi==0.141.1
+ uvicorn==0.52.4
+ jinja2==3.1.6
++python-multipart==0.0.32
+diff --git a/services/auth_service.py b/services/auth_service.py
+new file mode 100644
+index 0000000..9eb1cab
+--- /dev/null
++++ b/services/auth_service.py
+@@ -0,0 +1,85 @@
++# -*- coding: utf-8 -*-
++"""
++Auth Service — منطق مشترک احراز هویت (Phase 16C)
++
++این ماژول دقیقاً همان منطقی را پیاده می‌کند که قبلاً مستقیم داخل
++``ui/login_window.py`` قفل شده بود (خواندن کاربر با Username/IsActive و
++بررسی رمز با ``utils.security.verify_password``)، اما به‌صورت یک تابع
++خالص و کاملاً مستقل از UI (بدون هیچ وابستگی به PyQt یا FastAPI) تا هم
++پنجره‌ی دسکتاپ و هم Session Login وب از یک منبع واحد استفاده کنند —
++نه دو پیاده‌سازی موازی.
++
++پیام‌های خطا عیناً همان متن‌های قبلی ``login_window.py`` هستند تا رفتار
++دیده‌شده توسط کاربر دسکتاپ هیچ تغییری نکند.
++
++تغییر رفتاری جدید (additive، چیزی را نمی‌شکند): بعد از ورود موفق،
++``Users.LastLogin`` به‌روزرسانی می‌شود — ستونی که در Schema از قبل وجود
++داشت اما تا این فاز توسط هیچ کدی مقداردهی نمی‌شد. اگر این به‌روزرسانی با
++خطا مواجه شود، ورود کاربر را مسدود نمی‌کند (فقط نادیده گرفته می‌شود).
++"""
++
++import sys
++import os
++
++sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from database.db import Database
++from utils.security import verify_password
++
++
++class AuthError(Exception):
++    """پایه‌ی خطاهای احراز هویت. متن پیام مستقیماً برای نمایش به کاربر مناسب است."""
++
++
++class InvalidCredentials(AuthError):
++    """فیلدها خالی‌اند، یا نام‌کاربری یافت نشد/غیرفعال است."""
++
++
++class WrongPassword(AuthError):
++    """نام‌کاربری معتبر است اما رمز عبور اشتباه است."""
++
++
++def authenticate(username: str, password: str) -> dict:
++    """
++    نام‌کاربری و رمز را دقیقاً طبق همان قانون قبلی ``login_window.py``
++    بررسی می‌کند:
++
++    1) اگر فیلدها خالی باشند -> ``InvalidCredentials``
++    2) اگر کاربر با این Username و IsActive=1 پیدا نشود -> ``InvalidCredentials``
++    3) اگر رمز اشتباه باشد -> ``WrongPassword``
++    4) در غیر این صورت رکورد کامل کاربر (dict) برگردانده می‌شود.
++
++    خطاهای اتصال به دیتابیس (مثلاً نبود ODBC/SQL Server) عمداً اینجا catch
++    نمی‌شوند و همان‌طور که هستند بالا می‌روند، تا caller (UI دسکتاپ یا وب)
++    بتواند مثل قبل پیام «خطای اتصال» جداگانه نشان دهد.
++    """
++    username = (username or "").strip()
++    password = password or ""
++
++    if not username or not password:
++        raise InvalidCredentials("لطفاً نام کاربری و رمز عبور را وارد کنید.")
++
++    db = Database()
++    try:
++        user = db.fetch_one(
++            "SELECT * FROM Users WHERE Username = ? AND IsActive = 1", (username,)
++        )
++
++        if not user:
++            raise InvalidCredentials("نام کاربری یافت نشد یا غیرفعال است.")
++
++        if not verify_password(password, user["PasswordHash"], user["PasswordSalt"]):
++            raise WrongPassword("رمز عبور اشتباه است.")
++
++        _touch_last_login(db, user["ID"])
++
++        return user
++    finally:
++        db.close()
++
++
++def _touch_last_login(db: Database, user_id: int) -> None:
++    """LastLogin را به‌روزرسانی می‌کند؛ شکست این کار هرگز ورود را نمی‌شکند."""
++    try:
++        db.execute("UPDATE Users SET LastLogin = GETDATE() WHERE ID = ?", (user_id,))
++    except Exception:
++        pass
+diff --git a/services/web_session_service.py b/services/web_session_service.py
+new file mode 100644
+index 0000000..29ce599
+--- /dev/null
++++ b/services/web_session_service.py
+@@ -0,0 +1,80 @@
++# -*- coding: utf-8 -*-
++"""
++Web Session Service — Session Login مبتنی بر Cookie برای وب (Phase 16C)
++
++⚠️ این ماژول با ``services/session_service.py`` (Phase 12 — چرخه‌ی اجرای
++برنامه‌ی دسکتاپ: Heartbeat/Crash Detection/AutoSave) کاملاً بی‌ربط است و
++جدول جداگانه‌ی خودش (``WebSessions`` — ساخته‌شده در
++``database/migrations/015_web_sessions.sql``) را دارد. هیچ‌کدام از این
++دو به دیگری وابسته نیست.
++
++Token یک رشته‌ی تصادفی امن (``secrets.token_urlsafe``) است که در یک
++Cookie با ``HttpOnly`` روی مرورگر کاربر ذخیره می‌شود؛ خود Session کاملاً
++Server-side است (فقط Token در WebSessions جست‌وجو می‌شود، نه هیچ داده‌ی
++دیگری در Cookie).
++"""
++
++import sys
++import os
++import secrets
++
++sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from database.db import Database
++
++SESSION_DURATION_HOURS = 12
++COOKIE_NAME = "storeapp_web_session"
++
++
++def create_web_session(user_id: int) -> str:
++    """یک Session وب جدید برای این کاربر می‌سازد و Token آن را برمی‌گرداند."""
++    token = secrets.token_urlsafe(32)
++
++    db = Database()
++    try:
++        db.execute(
++            "INSERT INTO WebSessions (Token, UserRef, CreatedAt, ExpiresAt) "
++            "VALUES (?, ?, GETDATE(), DATEADD(HOUR, ?, GETDATE()))",
++            (token, user_id, SESSION_DURATION_HOURS),
++        )
++    finally:
++        db.close()
++
++    return token
++
++
++def get_user_for_token(token: str):
++    """
++    اگر Token معتبر و هنوز منقضی‌نشده باشد، رکورد کاربر فعال متناظر را
++    برمی‌گرداند؛ در غیر این صورت ``None``.
++    """
++    if not token:
++        return None
++
++    db = Database()
++    try:
++        session_row = db.fetch_one(
++            "SELECT * FROM WebSessions WHERE Token = ? AND ExpiresAt > GETDATE()",
++            (token,),
++        )
++        if not session_row:
++            return None
++
++        user = db.fetch_one(
++            "SELECT * FROM Users WHERE ID = ? AND IsActive = 1",
++            (session_row["UserRef"],),
++        )
++        return user
++    finally:
++        db.close()
++
++
++def destroy_web_session(token: str) -> None:
++    """Session را باطل می‌کند (Logout). اگر Token از قبل معتبر نباشد، بی‌اثر است."""
++    if not token:
++        return
++
++    db = Database()
++    try:
++        db.execute("DELETE FROM WebSessions WHERE Token = ?", (token,))
++    finally:
++        db.close()
+diff --git a/tests/test_auth_service.py b/tests/test_auth_service.py
+new file mode 100644
+index 0000000..d03f80b
+--- /dev/null
++++ b/tests/test_auth_service.py
+@@ -0,0 +1,137 @@
++# -*- coding: utf-8 -*-
++"""
++Phase 16C — تست‌های auth_service.
++
++این تست‌ها منطق استخراج‌شده از ui/login_window.py را بدون هیچ وابستگی
++به PyQt یا دیتابیس واقعی بررسی می‌کنند.
++"""
++
++import pytest
++
++import services.auth_service as auth_service
++from services.auth_service import InvalidCredentials, WrongPassword
++from utils.security import hash_password
++
++
++class FakeAuthDatabase:
++    """Fake ساده و مخصوص این فایل تست؛ فقط SQLهایی که auth_service می‌زند."""
++
++    users = []
++    last_login_updates = []
++
++    def __init__(self):
++        pass
++
++    @classmethod
++    def reset(cls, users=None):
++        cls.users = users if users is not None else []
++        cls.last_login_updates = []
++
++    def fetch_one(self, sql, params=()):
++        normalized = " ".join(sql.split()).upper()
++        if normalized.startswith("SELECT * FROM USERS WHERE USERNAME"):
++            username = params[0]
++            for user in self.__class__.users:
++                if user["Username"] == username and user["IsActive"]:
++                    return dict(user)
++            return None
++        raise AssertionError(f"Unsupported fetch_one SQL: {sql}")
++
++    def execute(self, sql, params=()):
++        normalized = " ".join(sql.split()).upper()
++        if normalized.startswith("UPDATE USERS SET LASTLOGIN"):
++            self.__class__.last_login_updates.append(params[0])
++            return
++        raise AssertionError(f"Unsupported execute SQL: {sql}")
++
++    def close(self):
++        pass
++
++
++def _make_user(user_id=1, username="ali", password="secret123"):
++    hashed, salt = hash_password(password)
++    return {
++        "ID": user_id,
++        "Username": username,
++        "PasswordHash": hashed,
++        "PasswordSalt": salt,
++        "FullName": "علی محمدی",
++        "IsAdmin": False,
++        "IsActive": True,
++    }
++
++
++def setup_function():
++    FakeAuthDatabase.reset()
++    auth_service.Database = FakeAuthDatabase
++
++
++def test_authenticate_success_returns_user_and_updates_last_login():
++    user = _make_user()
++    FakeAuthDatabase.reset(users=[user])
++
++    result = auth_service.authenticate("ali", "secret123")
++
++    assert result["ID"] == 1
++    assert result["Username"] == "ali"
++    assert FakeAuthDatabase.last_login_updates == [1]
++
++
++def test_authenticate_empty_username_raises_invalid_credentials():
++    FakeAuthDatabase.reset(users=[_make_user()])
++
++    with pytest.raises(InvalidCredentials):
++        auth_service.authenticate("", "secret123")
++
++
++def test_authenticate_empty_password_raises_invalid_credentials():
++    FakeAuthDatabase.reset(users=[_make_user()])
++
++    with pytest.raises(InvalidCredentials):
++        auth_service.authenticate("ali", "")
++
++
++def test_authenticate_unknown_username_raises_invalid_credentials():
++    FakeAuthDatabase.reset(users=[_make_user()])
++
++    with pytest.raises(InvalidCredentials):
++        auth_service.authenticate("no-such-user", "secret123")
++
++
++def test_authenticate_inactive_user_raises_invalid_credentials():
++    user = _make_user()
++    user["IsActive"] = False
++    FakeAuthDatabase.reset(users=[user])
++
++    with pytest.raises(InvalidCredentials):
++        auth_service.authenticate("ali", "secret123")
++
++
++def test_authenticate_wrong_password_raises_wrong_password():
++    FakeAuthDatabase.reset(users=[_make_user()])
++
++    with pytest.raises(WrongPassword):
++        auth_service.authenticate("ali", "not-the-password")
++
++
++def test_authenticate_wrong_password_does_not_update_last_login():
++    FakeAuthDatabase.reset(users=[_make_user()])
++
++    with pytest.raises(WrongPassword):
++        auth_service.authenticate("ali", "not-the-password")
++
++    assert FakeAuthDatabase.last_login_updates == []
++
++
++def test_last_login_update_failure_does_not_block_login(monkeypatch):
++    user = _make_user()
++    FakeAuthDatabase.reset(users=[user])
++
++    def _boom(self, sql, params=()):
++        raise RuntimeError("simulated DB failure")
++
++    monkeypatch.setattr(FakeAuthDatabase, "execute", _boom)
++
++    result = auth_service.authenticate("ali", "secret123")
++
++    assert result["ID"] == 1
+diff --git a/tests/test_web_auth.py b/tests/test_web_auth.py
+new file mode 100644
+index 0000000..b3430e6
+--- /dev/null
++++ b/tests/test_web_auth.py
+@@ -0,0 +1,150 @@
++# -*- coding: utf-8 -*-
++"""
++Phase 16C — تست‌های end-to-end لایه‌ی HTTP احراز هویت وب.
++
++این تست‌ها لایه‌ی auth_service/web_session_service را monkeypatch می‌کنند
++تا به هیچ دیتابیس واقعی نیاز نداشته باشند - دقیقاً همان اصلی که
++tests/test_web_skeleton.py هم دنبال می‌کند (فقط لایه‌ی HTTP، بدون DB واقعی).
++"""
++
++from fastapi.testclient import TestClient
++
++from web.app import app
++from services.auth_service import InvalidCredentials, WrongPassword
++import web.app as web_app
++
++client = TestClient(app)
++
++FAKE_USER = {"ID": 7, "Username": "ali", "FullName": "علی محمدی", "IsAdmin": False}
++
++
++def setup_function():
++    client.cookies.clear()
++
++
++# --------------------------------------------------------------------------
++# دسترسی بدون احراز هویت
++# --------------------------------------------------------------------------
++
++def test_home_without_cookie_redirects_to_login():
++    response = client.get("/", follow_redirects=False)
++    assert response.status_code == 303
++    assert response.headers["location"] == "/login"
++
++
++def test_home_without_cookie_follows_to_login_page():
++    response = client.get("/")
++    assert response.status_code == 200
++    assert "ورود" in response.text
++
++
++def test_login_page_renders_form():
++    response = client.get("/login")
++    assert response.status_code == 200
++    assert "name=\"username\"" in response.text
++    assert "name=\"password\"" in response.text
++
++
++def test_health_does_not_require_auth():
++    response = client.get("/health")
++    assert response.status_code == 200
++
++
++# --------------------------------------------------------------------------
++# ورود موفق
++# --------------------------------------------------------------------------
++
++def test_successful_login_sets_cookie_and_redirects_home(monkeypatch):
++    monkeypatch.setattr(web_app, "authenticate", lambda u, p: FAKE_USER)
++    monkeypatch.setattr(web_app.web_session_service, "create_web_session", lambda uid: "fake-token-123")
++
++    response = client.post(
++        "/login",
++        data={"username": "ali", "password": "secret123"},
++        follow_redirects=False,
++    )
++
++    assert response.status_code == 303
++    assert response.headers["location"] == "/"
++    assert response.cookies.get(web_app.web_session_service.COOKIE_NAME) == "fake-token-123"
++
++
++def test_authenticated_home_shows_username(monkeypatch):
++    monkeypatch.setattr(web_app.web_session_service, "get_user_for_token", lambda token: FAKE_USER)
++    client.cookies.set(web_app.web_session_service.COOKIE_NAME, "any-token")
++
++    response = client.get("/")
++
++    assert response.status_code == 200
++    assert "علی محمدی" in response.text
++
++
++def test_login_page_redirects_away_if_already_authenticated(monkeypatch):
++    monkeypatch.setattr(web_app.web_session_service, "get_user_for_token", lambda token: FAKE_USER)
++    client.cookies.set(web_app.web_session_service.COOKIE_NAME, "any-token")
++
++    response = client.get("/login", follow_redirects=False)
++
++    assert response.status_code == 303
++    assert response.headers["location"] == "/"
++
++
++# --------------------------------------------------------------------------
++# ورود ناموفق
++# --------------------------------------------------------------------------
++
++def test_login_invalid_credentials_shows_error_without_setting_cookie(monkeypatch):
++    def _raise(u, p):
++        raise InvalidCredentials("نام کاربری یافت نشد یا غیرفعال است.")
++
++    monkeypatch.setattr(web_app, "authenticate", _raise)
++
++    response = client.post("/login", data={"username": "nobody", "password": "x"})
++
++    assert response.status_code == 401
++    assert "نام کاربری یافت نشد" in response.text
++    assert web_app.web_session_service.COOKIE_NAME not in response.cookies
++
++
++def test_login_wrong_password_shows_error(monkeypatch):
++    def _raise(u, p):
++        raise WrongPassword("رمز عبور اشتباه است.")
++
++    monkeypatch.setattr(web_app, "authenticate", _raise)
++
++    response = client.post("/login", data={"username": "ali", "password": "wrong"})
++
++    assert response.status_code == 401
++    assert "رمز عبور اشتباه است" in response.text
++
++
++def test_login_database_error_shows_connection_error(monkeypatch):
++    def _raise(u, p):
++        raise RuntimeError("no ODBC driver")
++
++    monkeypatch.setattr(web_app, "authenticate", _raise)
++
++    response = client.post("/login", data={"username": "ali", "password": "x"})
++
++    assert response.status_code == 503
++    assert "اتصال به دیتابیس" in response.text
++
++
++# --------------------------------------------------------------------------
++# خروج (Logout)
++# --------------------------------------------------------------------------
++
++def test_logout_clears_cookie_and_redirects_to_login(monkeypatch):
++    destroyed = {}
++    monkeypatch.setattr(
++        web_app.web_session_service,
++        "destroy_web_session",
++        lambda token: destroyed.setdefault("token", token),
++    )
++    client.cookies.set(web_app.web_session_service.COOKIE_NAME, "token-to-kill")
++
++    response = client.post("/logout", follow_redirects=False)
++
++    assert response.status_code == 303
++    assert response.headers["location"] == "/login"
++    assert destroyed["token"] == "token-to-kill"
+diff --git a/tests/test_web_session_service.py b/tests/test_web_session_service.py
+new file mode 100644
+index 0000000..6fc4b1b
+--- /dev/null
++++ b/tests/test_web_session_service.py
+@@ -0,0 +1,109 @@
++# -*- coding: utf-8 -*-
++"""Phase 16C — تست‌های web_session_service (Session Login وب، مستقل از Sessions دسکتاپ)."""
++
++import services.web_session_service as web_session_service
++
++
++class FakeWebSessionDatabase:
++    sessions = {}   # token -> {"UserRef": int, "expired": bool}
++    users = {}      # user_id -> dict
++
++    def __init__(self):
++        pass
++
++    @classmethod
++    def reset(cls, users=None):
++        cls.sessions = {}
++        cls.users = users if users is not None else {}
++
++    def execute(self, sql, params=()):
++        normalized = " ".join(sql.split()).upper()
++
++        if normalized.startswith("INSERT INTO WEBSESSIONS"):
++            token, user_id, hours = params
++            self.__class__.sessions[token] = {"UserRef": user_id, "expired": False}
++            return
++
++        if normalized.startswith("DELETE FROM WEBSESSIONS"):
++            token = params[0]
++            self.__class__.sessions.pop(token, None)
++            return
++
++        raise AssertionError(f"Unsupported execute SQL: {sql}")
++
++    def fetch_one(self, sql, params=()):
++        normalized = " ".join(sql.split()).upper()
++
++        if normalized.startswith("SELECT * FROM WEBSESSIONS"):
++            token = params[0]
++            row = self.__class__.sessions.get(token)
++            if not row or row["expired"]:
++                return None
++            return {"Token": token, "UserRef": row["UserRef"]}
++
++        if normalized.startswith("SELECT * FROM USERS WHERE ID"):
++            user_id = params[0]
++            return self.__class__.users.get(user_id)
++
++        raise AssertionError(f"Unsupported fetch_one SQL: {sql}")
++
++    def close(self):
++        pass
++
++
++def setup_function():
++    FakeWebSessionDatabase.reset(users={1: {"ID": 1, "Username": "ali", "IsActive": True}})
++    web_session_service.Database = FakeWebSessionDatabase
++
++
++def test_create_web_session_returns_token_and_stores_it():
++    token = web_session_service.create_web_session(1)
++
++    assert token
++    assert FakeWebSessionDatabase.sessions[token]["UserRef"] == 1
++
++
++def test_get_user_for_token_returns_user_for_valid_token():
++    token = web_session_service.create_web_session(1)
++
++    user = web_session_service.get_user_for_token(token)
++
++    assert user["ID"] == 1
++    assert user["Username"] == "ali"
++
++
++def test_get_user_for_token_returns_none_for_missing_token():
++    assert web_session_service.get_user_for_token("not-a-real-token") is None
++
++
++def test_get_user_for_token_returns_none_for_empty_token():
++    assert web_session_service.get_user_for_token("") is None
++    assert web_session_service.get_user_for_token(None) is None
++
++
++def test_get_user_for_token_returns_none_for_expired_session():
++    token = web_session_service.create_web_session(1)
++    FakeWebSessionDatabase.sessions[token]["expired"] = True
++
++    assert web_session_service.get_user_for_token(token) is None
++
++
++def test_destroy_web_session_invalidates_token():
++    token = web_session_service.create_web_session(1)
++
++    web_session_service.destroy_web_session(token)
++
++    assert web_session_service.get_user_for_token(token) is None
++
++
++def test_destroy_web_session_is_safe_for_missing_token():
++    # نباید Exception بیندازد حتی اگر Token از قبل وجود نداشته باشد.
++    web_session_service.destroy_web_session("does-not-exist")
++    web_session_service.destroy_web_session(None)
++
++
++def test_each_created_session_gets_a_unique_token():
++    token1 = web_session_service.create_web_session(1)
++    token2 = web_session_service.create_web_session(1)
++
++    assert token1 != token2
+diff --git a/ui/login_window.py b/ui/login_window.py
+index 5dfd3b9..157d061 100644
+--- a/ui/login_window.py
++++ b/ui/login_window.py
+@@ -9,8 +9,7 @@ from PyQt6.QtCore import Qt
+ import sys, os
+ 
+ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+-from database.db import Database
+-from utils.security import verify_password
++from services.auth_service import authenticate, InvalidCredentials, WrongPassword
+ 
+ 
+ class LoginWindow(QWidget):
+@@ -54,28 +53,15 @@ class LoginWindow(QWidget):
+         username = self.username_input.text().strip()
+         password = self.password_input.text()
+ 
+-        if not username or not password:
+-            QMessageBox.warning(self, "خطا", "لطفاً نام کاربری و رمز عبور را وارد کنید.")
+-            return
+-
+         try:
+-            db = Database()
+-            user = db.fetch_one(
+-                "SELECT * FROM Users WHERE Username = ? AND IsActive = 1", (username,)
+-            )
+-            db.close()
++            user = authenticate(username, password)
++        except (InvalidCredentials, WrongPassword) as e:
++            QMessageBox.warning(self, "خطا", str(e))
++            return
+         except Exception as e:
+             QMessageBox.critical(self, "خطای اتصال",
+                                   f"اتصال به دیتابیس برقرار نشد:\n{e}")
+             return
+ 
+-        if not user:
+-            QMessageBox.warning(self, "خطا", "نام کاربری یافت نشد یا غیرفعال است.")
+-            return
+-
+-        if not verify_password(password, user["PasswordHash"], user["PasswordSalt"]):
+-            QMessageBox.warning(self, "خطا", "رمز عبور اشتباه است.")
+-            return
+-
+         self.on_success(user)
+         self.close()
+diff --git a/web/app.py b/web/app.py
+index dd17a31..54f5420 100644
+--- a/web/app.py
++++ b/web/app.py
+@@ -1,15 +1,19 @@
+ # -*- coding: utf-8 -*-
+ """
+ Phase 16B — Web Backend Skeleton
++Phase 16C — Auth Extraction + Session Login
+ 
+-هدف این فایل فقط ساخت یک اسکلت وب واقعی (FastAPI + Jinja2) است تا StoreApp
+-بتواند به‌صورت محلی از طریق Chrome باز شود.
++هدف اولیه‌ی این فایل ساخت یک اسکلت وب واقعی (FastAPI + Jinja2) بود تا
++StoreApp بتواند به‌صورت محلی از طریق Chrome باز شود (Phase 16B). در
++Phase 16C این فایل به `services/auth_service.py` (همان منطقی که از
++`ui/login_window.py` استخراج شد) و `services/web_session_service.py`
++(Session Login مبتنی بر Cookie، مستقل از `Sessions` دسکتاپ) وصل شده تا
++`/` واقعاً پشت احراز هویت باشد.
+ 
+-هیچ business logic ای اینجا بازنویسی نمی‌شود. هیچ service ای در این فاز
+-فراخوانی یا تغییر داده نمی‌شود. این فایل فقط زیرساخت HTTP را فراهم می‌کند.
++هیچ business logic حسابداری/فروش/انبار ای اینجا بازنویسی نمی‌شود. این
++فایل همچنان فقط زیرساخت HTTP + Auth است.
+ 
+-این ماژول عمداً هیچ اتصال دیتابیس واقعی برقرار نمی‌کند مگر در endpoint
+-`/health` و آن هم فقط برای گزارش وضعیت، نه برای هیچ عملیات دیگر.
++`/health` عمداً بدون احراز هویت باقی مانده (برای Health Check ساده).
+ """
+ 
+ import os
+@@ -22,12 +26,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ if str(PROJECT_ROOT) not in sys.path:
+     sys.path.append(str(PROJECT_ROOT))
+ 
+-from fastapi import FastAPI
+-from fastapi.responses import HTMLResponse
++from fastapi import FastAPI, Form
++from fastapi.responses import HTMLResponse, RedirectResponse
+ from fastapi.staticfiles import StaticFiles
+ from fastapi.templating import Jinja2Templates
+ from starlette.requests import Request
+ 
++from services.auth_service import authenticate, InvalidCredentials, WrongPassword
++from services import web_session_service
++
+ WEB_DIR = Path(__file__).resolve().parent
+ 
+ app = FastAPI(
+@@ -60,21 +67,94 @@ def check_database_status() -> dict:
+         return {"status": "not_connected", "detail": str(exc)}
+ 
+ 
++def get_current_user(request: Request) -> dict | None:
++    """
++    اگر Cookie معتبر باشد رکورد کاربر را برمی‌گرداند، وگرنه ``None``.
++    خودِ این تابع هیچ Redirect ای انجام نمی‌دهد — تصمیم با caller است.
++    """
++    token = request.cookies.get(web_session_service.COOKIE_NAME)
++    return web_session_service.get_user_for_token(token)
++
++
+ @app.get("/", response_class=HTMLResponse)
+ def home(request: Request):
++    user = get_current_user(request)
++    if not user:
++        return RedirectResponse(url="/login", status_code=303)
++
+     return templates.TemplateResponse(
+         request=request,
+         name="home.html",
+-        context={"page_title": "پیشخوان — StoreApp"},
++        context={"page_title": "پیشخوان — StoreApp", "user": user},
+     )
+ 
+ 
++@app.get("/login", response_class=HTMLResponse)
++def login_form(request: Request):
++    if get_current_user(request):
++        return RedirectResponse(url="/", status_code=303)
++
++    return templates.TemplateResponse(
++        request=request,
++        name="login.html",
++        context={"page_title": "ورود — StoreApp", "error": None},
++    )
++
++
++@app.post("/login", response_class=HTMLResponse)
++def login_submit(
++    request: Request,
++    username: str = Form(...),
++    password: str = Form(...),
++):
++    try:
++        user = authenticate(username, password)
++    except (InvalidCredentials, WrongPassword) as exc:
++        return templates.TemplateResponse(
++            request=request,
++            name="login.html",
++            context={"page_title": "ورود — StoreApp", "error": str(exc)},
++            status_code=401,
++        )
++    except Exception as exc:  # noqa: BLE001 - همان الگوی صادقانه check_database_status
++        return templates.TemplateResponse(
++            request=request,
++            name="login.html",
++            context={
++                "page_title": "ورود — StoreApp",
++                "error": f"اتصال به دیتابیس برقرار نشد: {exc}",
++            },
++            status_code=503,
++        )
++
++    token = web_session_service.create_web_session(user["ID"])
++    response = RedirectResponse(url="/", status_code=303)
++    response.set_cookie(
++        key=web_session_service.COOKIE_NAME,
++        value=token,
++        httponly=True,
++        samesite="lax",
++        max_age=web_session_service.SESSION_DURATION_HOURS * 3600,
++    )
++    return response
++
++
++@app.post("/logout")
++def logout(request: Request):
++    token = request.cookies.get(web_session_service.COOKIE_NAME)
++    web_session_service.destroy_web_session(token)
++
++    response = RedirectResponse(url="/login", status_code=303)
++    response.delete_cookie(web_session_service.COOKIE_NAME)
++    return response
++
++
+ @app.get("/health")
+ def health():
+     db_status = check_database_status()
+     return {
+         "status": "ok",
+-        "phase": "16B - Web Backend Skeleton",
++        "phase": "16C - Auth Extraction + Session Login",
+         "database": db_status,
+     }
+ 
+diff --git a/web/static/style.css b/web/static/style.css
+index a1a363f..12f9c49 100644
+--- a/web/static/style.css
++++ b/web/static/style.css
+@@ -52,6 +52,60 @@ body {
+     display: inline-block;
+ }
+ 
++.login-box {
++    background-color: #ffffff;
++    border: 1px solid #e0e0e0;
++    border-radius: 8px;
++    padding: 1.5rem;
++    max-width: 320px;
++    margin: 0 auto;
++}
++
++.login-form {
++    display: flex;
++    flex-direction: column;
++    gap: 0.5rem;
++    margin-top: 1rem;
++}
++
++.login-form label {
++    font-size: 0.9rem;
++}
++
++.login-form input {
++    padding: 0.5rem;
++    border: 1px solid #ccc;
++    border-radius: 4px;
++    font-family: inherit;
++    direction: rtl;
++}
++
++.login-form button,
++.logout-form button {
++    margin-top: 0.5rem;
++    padding: 0.6rem;
++    border: none;
++    border-radius: 4px;
++    background-color: #1f3a5f;
++    color: #ffffff;
++    cursor: pointer;
++    font-family: inherit;
++    font-size: 0.95rem;
++}
++
++.login-error {
++    background-color: #fdecea;
++    color: #b3261e;
++    border: 1px solid #f5c6c2;
++    border-radius: 4px;
++    padding: 0.6rem;
++    font-size: 0.9rem;
++}
++
++.logout-form {
++    margin-top: 1rem;
++}
++
+ .app-footer {
+     text-align: center;
+     color: #888;
+diff --git a/web/templates/home.html b/web/templates/home.html
+index 30f3d47..3027a2d 100644
+--- a/web/templates/home.html
++++ b/web/templates/home.html
+@@ -2,7 +2,7 @@
+ 
+ {% block content %}
+     <section class="welcome-box">
+-        <h2>به StoreApp خوش آمدید</h2>
++        <h2>به StoreApp خوش آمدید{% if user %}, {{ user.FullName }}{% endif %}</h2>
+         <p>
+             این نسخه‌ی وب هنوز در مرحله‌ی اسکلت (Skeleton) قرار دارد.
+             هیچ‌کدام از فرآیندهای واقعی فروش، خرید یا حسابداری هنوز از
+@@ -12,5 +12,11 @@
+             برای بررسی وضعیت سرور و اتصال دیتابیس به آدرس
+             <code>/health</code> مراجعه کنید.
+         </p>
++
++        {% if user %}
++            <form method="post" action="/logout" class="logout-form">
++                <button type="submit">خروج از سیستم</button>
++            </form>
++        {% endif %}
+     </section>
+ {% endblock %}
+diff --git a/web/templates/login.html b/web/templates/login.html
+new file mode 100644
+index 0000000..18e2059
+--- /dev/null
++++ b/web/templates/login.html
+@@ -0,0 +1,21 @@
++{% extends "base.html" %}
++
++{% block content %}
++    <section class="login-box">
++        <h2>ورود به سیستم</h2>
++
++        {% if error %}
++            <p class="login-error">{{ error }}</p>
++        {% endif %}
++
++        <form method="post" action="/login" class="login-form">
++            <label for="username">نام کاربری</label>
++            <input type="text" id="username" name="username" autofocus required>
++
++            <label for="password">رمز عبور</label>
++            <input type="password" id="password" name="password" required>
++
++            <button type="submit">ورود</button>
++        </form>
++    </section>
++{% endblock %}
+-- 
+2.43.0
+
